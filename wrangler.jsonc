@@ -1,0 +1,35 @@
+{
+	"name": "nwslapp-match-watcher",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-06-01",
+	"observability": {
+		"enabled": true,
+	},
+	// Cloudflare's cron floor is 1 minute. Sub-minute polling would need a Durable
+	// Object alarm (scale-only future work).
+	"triggers": {
+		"crons": ["* * * * *"],
+	},
+	// Per-match last-known scores. Create the namespace with
+	//   wrangler kv namespace create MATCH_STATE
+	// then paste its id below (and a preview_id for `wrangler dev`).
+	"kv_namespaces": [
+		{
+			"binding": "MATCH_STATE",
+			"id": "REPLACE_WITH_KV_NAMESPACE_ID",
+		},
+	],
+	// Non-secret config. Team ID + Key ID are not sensitive (they ride inside the
+	// APNs JWT). Flip APNS_HOST to api.push.apple.com for TestFlight/App Store builds.
+	"vars": {
+		"APNS_HOST": "api.sandbox.push.apple.com",
+		"APNS_BUNDLE_ID": "com.tiffanyrieth.nwslapp.NWSLApp",
+		"APNS_TEAM_ID": "REPLACE_WITH_APPLE_TEAM_ID",
+		"APNS_KEY_ID": "REPLACE_WITH_APNS_KEY_ID",
+		"SUPABASE_URL": "https://REPLACE.supabase.co",
+	},
+	// Secrets — set with `wrangler secret put <NAME>` (never committed):
+	//   APNS_KEY_P8                 the .p8 private key, full PEM text
+	//   SUPABASE_SERVICE_ROLE_KEY   Supabase service-role key (bypasses RLS)
+	//   MANUAL_TRIGGER_SECRET       guards POST /test-push
+}

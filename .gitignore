@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Wrangler / build
+.wrangler/
+dist/
+.mf/
+
+# Secrets — never commit
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+*.p8
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
