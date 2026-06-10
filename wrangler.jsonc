@@ -10,26 +10,26 @@
 	"triggers": {
 		"crons": ["* * * * *"],
 	},
-	// Per-match last-known scores. Create the namespace with
-	//   wrangler kv namespace create MATCH_STATE
-	// then paste its id below (and a preview_id for `wrangler dev`).
+	// Per-match last-known scores (created via `wrangler kv namespace create MATCH_STATE`).
 	"kv_namespaces": [
 		{
 			"binding": "MATCH_STATE",
-			"id": "REPLACE_WITH_KV_NAMESPACE_ID",
+			"id": "c00d44c4505844108c91f15282a4cfae",
 		},
 	],
-	// Non-secret config. Team ID + Key ID are not sensitive (they ride inside the
-	// APNs JWT). Flip APNS_HOST to api.push.apple.com for TestFlight/App Store builds.
+	// Non-secret config. APNS_HOST is sandbox by default (a build run from Xcode);
+	// flip it to api.push.apple.com for TestFlight/App Store builds, then re-deploy.
 	"vars": {
 		"APNS_HOST": "api.sandbox.push.apple.com",
 		"APNS_BUNDLE_ID": "com.tiffanyrieth.nwslapp.NWSLApp",
-		"APNS_TEAM_ID": "REPLACE_WITH_APPLE_TEAM_ID",
-		"APNS_KEY_ID": "REPLACE_WITH_APNS_KEY_ID",
-		"SUPABASE_URL": "https://REPLACE.supabase.co",
 	},
-	// Secrets — set with `wrangler secret put <NAME>` (never committed):
-	//   APNS_KEY_P8                 the .p8 private key, full PEM text
-	//   SUPABASE_SERVICE_ROLE_KEY   Supabase service-role key (bypasses RLS)
-	//   MANUAL_TRIGGER_SECRET       guards POST /test-push
+	// Everything credential-bearing is a secret — set with `wrangler secret put <NAME>`
+	// (never committed). SUPABASE_URL + MANUAL_TRIGGER_SECRET are set during deploy;
+	// the rest come from your Apple/Supabase accounts:
+	//   APNS_KEY_P8                 the .p8 private key, full PEM text   (Apple)
+	//   APNS_KEY_ID                 the .p8's 10-char Key ID            (Apple)
+	//   APNS_TEAM_ID                Apple Developer Team ID             (Apple)
+	//   SUPABASE_SERVICE_ROLE_KEY   service-role key, bypasses RLS      (Supabase)
+	//   SUPABASE_URL                project URL                         (set at deploy)
+	//   MANUAL_TRIGGER_SECRET       guards POST /test-push              (set at deploy)
 }

@@ -40,46 +40,36 @@ would need a Durable Object alarm — a scale-only future optimization.
   delivery before real matches resume. Guarded by the `x-trigger-secret` header.
   Body: `{ "token": "<apns-device-token>", "title?": "...", "body?": "...", "eventID?": "..." }`.
 
-## One-time setup
+## Deployment status
 
-> Replace every `REPLACE_…` placeholder in `wrangler.jsonc` as you go.
+**Deployed** to `https://nwslapp-match-watcher.tiffany-rieth.workers.dev` (cron
+`* * * * *`, KV `MATCH_STATE` bound). Already set: `SUPABASE_URL`,
+`MANUAL_TRIGGER_SECRET`. The cron runs harmlessly with the remaining secrets
+unset — during the World Cup break there are no live matches, so each poll fetches
+the scoreboard, finds nothing live, and returns before touching Supabase/APNs.
 
-### 1. Apple — APNs auth key
-- Apple Developer portal → **Certificates, Identifiers & Profiles → Keys** → **+**.
-- Enable **Apple Push Notifications service (APNs)**, download the **`.p8`** (you
-  can only download it once). Note the **Key ID** (10 chars) and your **Team ID**.
-- Confirm the App ID `com.tiffanyrieth.nwslapp.NWSLApp` has the **Push
-  Notifications** capability enabled.
+### Remaining to make it fire (from your accounts)
 
-### 2. Supabase — schema + service-role key
-- Run the `device_tokens` + `notification_preferences` block from
-  `../NWSLApp/supabase/schema.sql` in the Supabase SQL editor.
-- Copy the **service-role** key (Project Settings → API). It is full-access —
-  treat it like a password; it lives only as a Worker secret.
-- Put the project URL in `wrangler.jsonc` `vars.SUPABASE_URL`.
+**1. Apple — APNs auth key.** Developer portal → **Keys** → **+** → enable **APNs**,
+download the **`.p8`** (once only); note the **Key ID** (10 chars) + **Team ID**.
+Confirm the App ID `com.tiffanyrieth.nwslapp.NWSLApp` has **Push Notifications** on.
 
-### 3. Cloudflare — KV + config
-```sh
-npm install
-wrangler kv namespace create MATCH_STATE      # paste the id into wrangler.jsonc
-```
-Fill `wrangler.jsonc` `vars`: `APNS_TEAM_ID`, `APNS_KEY_ID`, `SUPABASE_URL`.
-Leave `APNS_HOST` as `api.sandbox.push.apple.com` while testing with a build run
-from Xcode; switch to `api.push.apple.com` for TestFlight/App Store builds.
+**2. Supabase.** Run the `device_tokens` + `notification_preferences` block from
+`../NWSLApp/supabase/schema.sql` in the SQL editor. Copy the **service-role** key
+(Project Settings → API — full-access, treat as a password).
 
-### 4. Secrets
+**3. Set the four remaining secrets + re-deploy:**
 ```sh
 wrangler secret put APNS_KEY_P8                # paste the full .p8 PEM text
-wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-wrangler secret put MANUAL_TRIGGER_SECRET      # any long random string
-```
-
-### 5. Deploy
-```sh
-npm test          # unit-tests the goal-diff logic
-npm run typecheck
+wrangler secret put APNS_KEY_ID                # the 10-char Key ID
+wrangler secret put APNS_TEAM_ID               # Apple Team ID
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY  # full-access; bypasses RLS
 npm run deploy
 ```
+
+**4. For TestFlight (production APNs):** change `vars.APNS_HOST` in `wrangler.jsonc`
+to `api.push.apple.com` and re-deploy. (Sandbox `api.sandbox.push.apple.com` is for
+a build run directly from Xcode; the device-token environment must match the host.)
 
 ## Verifying delivery (during the World Cup break, no live matches)
 
@@ -90,7 +80,7 @@ token → set `APNS_HOST` to `api.push.apple.com`):
    device token to `device_tokens`. Read it there (or from the device log).
 2. Fire a synthetic goal:
    ```sh
-   curl -X POST https://nwslapp-match-watcher.<subdomain>.workers.dev/test-push \
+   curl -X POST https://nwslapp-match-watcher.tiffany-rieth.workers.dev/test-push \
      -H "x-trigger-secret: $MANUAL_TRIGGER_SECRET" \
      -H "content-type: application/json" \
      -d '{"token":"<device-token>"}'
