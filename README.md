@@ -5,8 +5,10 @@ notifications** (Tier 2 / server push). It is the sibling of
 [`nwslapp-proxy`](../nwslapp-proxy): the proxy is request/response and caches
 ESPN; this Worker is a cron job that watches matches and sends APNs pushes.
 
-**Stage B scope: GOALS.** Kickoff / halftime / full-time / substitutions are
-added later as more detection cases on the same pipeline.
+**Scope: kickoff · goal · halftime · full-time** — every live event the
+scoreboard's `status` exposes. **Substitutions + lineup-posted are not here:** the
+scoreboard `details` carry goals and cards but no subs, and lineups aren't on the
+scoreboard at all — both need the per-match `/summary` endpoint (a later stage).
 
 ## How it works
 
@@ -14,19 +16,22 @@ Once a minute (cron), the Worker:
 
 1. Fetches the season scoreboard through the **proxy** (`/scoreboard`), so it
    reuses the proxy's edge cache instead of hitting ESPN directly.
-2. For each **live** match (`status.type.state === "in"`), diffs the current
-   score against the last-known score stored in **KV** (`match:{eventId}`).
-3. When a side's score has risen, it's a goal. The Worker queries **Supabase**
-   with the **service-role key** (bypasses RLS) for the device tokens of every
-   user who follows **either** team in the fixture and has the `goals` alert on.
+2. For each match in the **live window** (kicked off within the last 4h), diffs
+   its current snapshot against the last-known state in **KV** (`match:{eventId}`)
+   to detect events: **kickoff** (went live in the 1st minute), **goal** (a side's
+   score rose), **halftime** (`STATUS_HALFTIME`, once), **full-time** (live → ended).
+3. For each event, it queries **Supabase** with the **service-role key** (bypasses
+   RLS) for the device tokens of every user who follows **either** team in the
+   fixture and has **that** alert enabled (`kickoff`/`goals`/`halftime`/`full_time`).
 4. It signs an **APNs JWT** (ES256, `.p8`) and sends the push to each token.
 
-First sighting of a match only sets a baseline (no push). A multi-goal jump
-between polls collapses to one push carrying the current scoreline. KV entries
-auto-expire 6h after last write.
+First sighting of a match only baselines (no push) — except kickoff, which fires
+on a live 1st minute (a clock guard avoids a false kickoff if the watcher starts
+mid-match). A multi-goal jump between polls collapses to one push with the current
+scoreline. A match's KV entry is deleted at full-time (and auto-expires after 6h).
 
-Goal latency ≈ up to 90s (1-min cron + the proxy's 30s live cache). Sub-minute
-polling would need a Durable Object alarm — a scale-only future optimization.
+Latency ≈ up to 90s (1-min cron + the proxy's 30s live cache). Sub-minute polling
+would need a Durable Object alarm — a scale-only future optimization.
 
 ## Routes
 

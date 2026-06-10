@@ -29,17 +29,31 @@ async function rest<T>(cfg: SupabaseConfig, pathAndQuery: string): Promise<T[]> 
 const uniq = (xs: string[]): string[] => [...new Set(xs)];
 const inList = (xs: string[]): string => `(${xs.join(",")})`;
 
+/** The `notification_preferences` columns the watcher can gate on. */
+export type PrefColumn = "kickoff" | "goals" | "halftime" | "full_time";
+
+// Whitelist so the column (interpolated into the PostgREST query) can never be
+// anything but a known internal value — these come from our own event types, not
+// user input, but the guard keeps it that way.
+const PREF_COLUMNS: readonly PrefColumn[] = ["kickoff", "goals", "halftime", "full_time"];
+
 /**
- * Device tokens to push a goal to: users who follow EITHER team in the match and
- * have the `goals` alert enabled. Three small selects, joined in JS:
+ * Device tokens to push an event to: users who follow EITHER team in the match and
+ * have the alert for this event type (`prefColumn`) enabled. Three small selects,
+ * joined in JS:
  *   follows(team_id ∈ teamIds) → user set
- *   notification_preferences(user ∈ set, goals = true) → eligible
+ *   notification_preferences(user ∈ set, {prefColumn} = true) → eligible
  *   device_tokens(user ∈ eligible) → tokens
  * A user with no prefs row (never signed in / synced) is correctly excluded — the
  * app upserts the row on sign-in, and Tier 2 requires sign-in anyway.
  */
-export async function tokensForGoal(cfg: SupabaseConfig, teamIds: string[]): Promise<string[]> {
+export async function tokensForEvent(
+	cfg: SupabaseConfig,
+	teamIds: string[],
+	prefColumn: PrefColumn,
+): Promise<string[]> {
 	if (teamIds.length === 0) return [];
+	if (!PREF_COLUMNS.includes(prefColumn)) throw new Error(`Unknown pref column: ${prefColumn}`);
 
 	const follows = await rest<{ user_id: string }>(
 		cfg,
@@ -50,7 +64,7 @@ export async function tokensForGoal(cfg: SupabaseConfig, teamIds: string[]): Pro
 
 	const prefs = await rest<{ user_id: string }>(
 		cfg,
-		`notification_preferences?user_id=in.${inList(followerIds)}&goals=eq.true&select=user_id`,
+		`notification_preferences?user_id=in.${inList(followerIds)}&${prefColumn}=eq.true&select=user_id`,
 	);
 	const eligibleIds = uniq(prefs.map((r) => r.user_id));
 	if (eligibleIds.length === 0) return [];

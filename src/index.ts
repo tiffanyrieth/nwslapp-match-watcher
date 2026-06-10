@@ -5,24 +5,27 @@
  * but reusing its cached ESPN data. Once a minute it:
  *   1. fetches the season scoreboard via the proxy (so it shares the edge cache,
  *      never hammering ESPN directly),
- *   2. for each LIVE match, diffs the score against the last-known state in KV,
- *   3. on a goal, looks up (service-role) the device tokens of users who follow
- *      either team and have goal alerts on, and
+ *   2. for each match in the live window, diffs its snapshot against the
+ *      last-known state in KV to detect events (kickoff / goal / halftime /
+ *      full-time),
+ *   3. for each event, looks up (service-role) the device tokens of users who
+ *      follow either team and have THAT alert enabled, and
  *   4. sends an APNs push to each.
  *
- * Stage B scope is GOALS only; kickoff / halftime / full-time / subs are added as
- * more detection cases on this same pipeline in Stage C. A manual `POST /test-push`
- * route sends a synthetic push to one device so on-device delivery can be verified
- * during the NWSL World Cup break, before real matches resume.
+ * Stages C adds kickoff/halftime/full-time to the original goals (Stage B), all
+ * from the scoreboard's status. Substitutions + lineup-posted need the per-match
+ * `/summary` endpoint (the scoreboard carries no subs and no lineups) → Stage D.
+ * A manual `POST /test-push` route sends a synthetic push to one device so
+ * on-device delivery can be verified during the NWSL World Cup break.
  *
  * Cloudflare's cron floor is 1 minute; with the proxy's 30s live TTL, end-to-end
- * goal latency is ≈ up to 90s. Sub-minute polling (a Durable Object alarm) is a
+ * latency is ≈ up to 90s. Sub-minute polling (a Durable Object alarm) is a
  * scale-only future optimization, not this stage.
  */
 
 import { apnsJwt, sendApns, type ApnsConfig } from "./apns";
-import { detectGoals, goalPayload, parseLiveMatch, stateOf, type ScoreboardEvent } from "./goals";
-import { tokensForGoal, type SupabaseConfig } from "./supabase";
+import { detectEvents, nextState, parseMatch, toPayload, type ScoreboardEvent, type StoredState } from "./events";
+import { tokensForEvent, type SupabaseConfig } from "./supabase";
 
 export interface Env {
 	/** KV namespace holding per-match last-known scores (key `match:{eventId}`). */
@@ -74,7 +77,7 @@ export default {
 
 		if (request.method === "GET" && url.pathname === "/") {
 			return new Response(
-				"nwslapp-match-watcher — cron goal watcher. POST /test-push (x-trigger-secret) to send a synthetic push.",
+				"nwslapp-match-watcher — cron live-event watcher (kickoff/goal/halftime/full-time). POST /test-push (x-trigger-secret) to send a synthetic push.",
 				{ status: 200 },
 			);
 		}
@@ -87,9 +90,24 @@ export default {
 	},
 } satisfies ExportedHandler<Env>;
 
-/** One poll: scoreboard → per-live-match diff → goal pushes. */
+// A match is "in the live window" if it kicked off within the last 4h (covers
+// in-progress + just-finished) and not more than 5min in the future. This bounds
+// the per-match KV reads to today's handful of games instead of the whole season.
+const WINDOW_PAST_MS = 4 * 60 * 60 * 1000;
+const WINDOW_FUTURE_MS = 5 * 60 * 1000;
+
+/** Kickoff time in ms, tolerating ESPN's seconds-less timestamps ("…T17:00Z"). */
+function kickoffMs(event: ScoreboardEvent): number | null {
+	if (!event.date) return null;
+	const normalized = /T\d{2}:\d{2}Z$/.test(event.date) ? event.date.replace("Z", ":00Z") : event.date;
+	const ms = Date.parse(normalized);
+	return Number.isFinite(ms) ? ms : null;
+}
+
+/** One poll: scoreboard → per-match diff → event pushes. */
 async function runWatch(env: Env): Promise<void> {
 	const year = new Date().getUTCFullYear();
+	const now = Date.now();
 	let events: ScoreboardEvent[];
 	try {
 		const res = await fetch(`${PROXY_SCOREBOARD}?dates=${year}0101-${year}1231&limit=500`, {
@@ -105,41 +123,52 @@ async function runWatch(env: Env): Promise<void> {
 		return;
 	}
 
-	const liveMatches = events.map(parseLiveMatch).filter((m) => m !== null);
-	if (liveMatches.length === 0) return; // nothing live — cheapest path, no KV/APNs.
-
 	const sb = supabaseConfig(env);
 	const apns = apnsConfig(env);
-	let jwt: string | undefined; // signed lazily — only if a goal actually fires.
+	let jwt: string | undefined; // signed lazily — only if an event actually fires.
 
-	for (const match of liveMatches) {
+	for (const event of events) {
+		// Live-window gate (cheap, no I/O) before any KV read.
+		const ko = kickoffMs(event);
+		if (ko === null || now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) continue;
+
+		const match = parseMatch(event); // null unless "in" or "post" with both team ids
+		if (!match) continue;
+
 		const key = `match:${match.eventId}`;
-		const prev = await env.MATCH_STATE.get<{ home: { id: string; score: number }; away: { id: string; score: number } }>(
-			key,
-			"json",
-		);
-		const goals = detectGoals(prev, match);
+		const prev = await env.MATCH_STATE.get<StoredState>(key, "json");
 
-		// Persist the new baseline regardless of whether a goal fired.
-		await env.MATCH_STATE.put(key, JSON.stringify(stateOf(match)), { expirationTtl: MATCH_STATE_TTL });
+		// A "post" match we were never tracking (no prior live state) → already
+		// finished before we started; skip so we don't fire a late full-time.
+		if (match.state === "post" && !prev) continue;
 
-		for (const goal of goals) {
+		const detected = detectEvents(prev, match);
+
+		for (const ev of detected) {
 			let tokens: string[];
 			try {
-				tokens = await tokensForGoal(sb, goal.teamIds);
+				tokens = await tokensForEvent(sb, ev.teamIds, ev.prefColumn);
 			} catch (err) {
-				console.log(`[watcher] follower lookup failed for ${goal.eventId}: ${err}`);
+				console.log(`[watcher] follower lookup failed (${ev.type} ${ev.eventId}): ${err}`);
 				continue;
 			}
 			if (tokens.length === 0) continue;
 
 			jwt ??= await apnsJwt(apns);
-			const payload = goalPayload(goal);
+			const payload = toPayload(ev);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 			const sent = results.filter((r) => r.ok).length;
-			console.log(
-				`[watcher] goal ${goal.homeAbbr} ${goal.homeScore}-${goal.awayScore} ${goal.awayAbbr}: ${sent}/${tokens.length} pushed`,
-			);
+			console.log(`[watcher] ${ev.type} "${ev.title}": ${sent}/${tokens.length} pushed`);
+		}
+
+		// Persist the new state while live; clean up once the match has ended (so a
+		// later "post" tick is skipped by the no-prev guard above — no duplicate FT).
+		if (match.state === "post") {
+			await env.MATCH_STATE.delete(key);
+		} else {
+			await env.MATCH_STATE.put(key, JSON.stringify(nextState(prev, match, detected)), {
+				expirationTtl: MATCH_STATE_TTL,
+			});
 		}
 	}
 }
