@@ -25,6 +25,7 @@
 
 import { apnsJwt, sendApns, type ApnsConfig } from "./apns";
 import { detectEvents, nextState, parseMatch, toPayload, type ScoreboardEvent, type StoredState } from "./events";
+import { handleCard } from "./card";
 import { tokensForEvent, type SupabaseConfig } from "./supabase";
 
 export interface Env {
@@ -42,6 +43,12 @@ export interface Env {
 	APNS_BUNDLE_ID: string;
 	/** APNs host — api.sandbox.push.apple.com (dev) or api.push.apple.com (TestFlight). */
 	APNS_HOST: string;
+
+	/** This worker's own public origin (where GET /card lives) — goes in `imageUrl`. */
+	WATCHER_PUBLIC_URL: string;
+
+	/** Base origin of the sibling proxy (its GET /crest?team= serves the bundled crests). */
+	PROXY_BASE_URL: string;
 
 	/** Shared secret guarding the manual /test-push route. */
 	MANUAL_TRIGGER_SECRET: string;
@@ -71,15 +78,20 @@ export default {
 		ctx.waitUntil(runWatch(env));
 	},
 
-	// HTTP entry point: health + the manual test-push trigger.
-	async fetch(request: Request, env: Env): Promise<Response> {
+	// HTTP entry point: health + match-card render + the manual test-push trigger.
+	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 
 		if (request.method === "GET" && url.pathname === "/") {
 			return new Response(
-				"nwslapp-match-watcher — cron live-event watcher (kickoff/goal/halftime/full-time). POST /test-push (x-trigger-secret) to send a synthetic push.",
+				"nwslapp-match-watcher — cron live-event watcher (kickoff/goal/halftime/full-time). POST /test-push (x-trigger-secret) to send a synthetic push. GET /card/<matchId>?e&h&a&hs&as&min&sc renders the match card.",
 				{ status: 200 },
 			);
+		}
+
+		// Server-rendered match-card PNG attached to rich pushes (downloaded by the NSE).
+		if (request.method === "GET" && url.pathname.startsWith("/card/")) {
+			return handleCard(request, env, ctx);
 		}
 
 		if (request.method === "POST" && url.pathname === "/test-push") {
@@ -155,7 +167,7 @@ async function runWatch(env: Env): Promise<void> {
 			if (tokens.length === 0) continue;
 
 			jwt ??= await apnsJwt(apns);
-			const payload = toPayload(ev);
+			const payload = toPayload(ev, env.WATCHER_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 			const sent = results.filter((r) => r.ok).length;
 			console.log(`[watcher] ${ev.type} "${ev.title}": ${sent}/${tokens.length} pushed`);
@@ -174,16 +186,29 @@ async function runWatch(env: Env): Promise<void> {
 }
 
 /**
- * Manual trigger: send a synthetic push to one device token, so live delivery can
- * be verified on a real device before matches resume. Guarded by a shared secret.
- * Body: { token, title?, body?, eventID? }.
+ * Manual trigger: send a synthetic push to one device token, so the full RICH look
+ * (NSE wakes → downloads the match card → attaches it) can be verified on a real
+ * device before matches resume. A notification's appearance is purely a function of
+ * its payload, so this renders byte-identical to a live goal. Guarded by a secret.
+ *
+ * Body: { token, title?, subtitle?, body?, eventID?, event?, imageUrl? }. When
+ * `imageUrl` is omitted it defaults to this worker's own /card render for the given
+ * event, so the simplest call still produces the composited card.
  */
 async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
 		return new Response("Forbidden.", { status: 403 });
 	}
 
-	let payload: { token?: string; title?: string; body?: string; eventID?: string };
+	let payload: {
+		token?: string;
+		title?: string;
+		subtitle?: string;
+		body?: string;
+		eventID?: string;
+		event?: string;
+		imageUrl?: string;
+	};
 	try {
 		payload = (await request.json()) as typeof payload;
 	} catch {
@@ -196,18 +221,32 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	const apns = apnsConfig(env);
 	const jwt = await apnsJwt(apns);
 	const eventID = payload.eventID ?? "401853925";
+	const event = payload.event ?? "goal";
+	// Default to a real-looking goal card on this worker if the caller didn't pass one.
+	const imageUrl =
+		payload.imageUrl ??
+		`${env.WATCHER_PUBLIC_URL.replace(/\/$/, "")}/card/${eventID}?e=${event}&h=WAS&a=ORL&hs=1&as=0&min=67&sc=${encodeURIComponent("T. Rieth")}`;
+
+	const alert: Record<string, string> = {
+		title: payload.title ?? "GOAL — WAS 1–0 ORL",
+		body: payload.body ?? "Washington Spirit scored.",
+	};
+	if (payload.subtitle) alert.subtitle = payload.subtitle;
+
 	const result = await sendApns(
 		payload.token,
 		{
 			aps: {
-				alert: {
-					title: payload.title ?? "GOAL — WAS 1–0 ORL",
-					body: payload.body ?? "Washington Spirit scored",
-				},
+				alert,
+				"mutable-content": 1,
 				sound: "default",
-				"thread-id": eventID,
+				"thread-id": `match-${eventID}`,
+				"interruption-level": "time-sensitive",
 			},
 			eventID,
+			matchId: eventID,
+			event,
+			imageUrl,
 		},
 		jwt,
 		apns,

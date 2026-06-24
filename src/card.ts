@@ -1,0 +1,319 @@
+/**
+ * Match-card PNG renderer (Tier B of rich notifications).
+ *
+ * Composes both teams' crests + the live score + a status pill into a single PNG
+ * that the iOS Notification Service Extension downloads and attaches to the push.
+ * The payload only ever carries the URL (well under APNs' 4KB), never image bytes.
+ *
+ * Pipeline: a flexbox tree → satori → SVG → resvg-wasm → PNG. No headless browser,
+ * so it fits a Cloudflare Worker; output is deterministic and cacheable.
+ *
+ * Crest resolution (so a crest is NEVER missing — the most visible failure of this
+ * feature): self-hosted proxy /crest PNG (primary, yours, fast) → ESPN CDN by team
+ * id (fallback) → a colored ring + abbreviation drawn in the SVG (last resort only).
+ * When a real crest loads it is drawn as-is, with NO added ring/circle/border.
+ */
+
+import satori from "satori";
+import { Resvg, initWasm } from "@resvg/resvg-wasm";
+import resvgWasm from "@resvg/resvg-wasm/index_bg.wasm";
+import inter400 from "./fonts/inter-400.woff";
+import inter600 from "./fonts/inter-600.woff";
+import inter800 from "./fonts/inter-800.woff";
+
+interface CardEnv {
+	/** Proxy origin — its GET /crest?team=ABBR serves the self-hosted bundled crests. */
+	PROXY_BASE_URL: string;
+}
+
+/** Parsed /card query → render inputs. */
+interface CardOptions {
+	matchId: string;
+	event: string; // kickoff | goal | halftime | fulltime
+	homeAbbr: string;
+	awayAbbr: string;
+	homeScore: number;
+	awayScore: number;
+	minute?: number;
+	scorer?: string;
+	homeId?: string; // ESPN team id (for crest fallback)
+	awayId?: string;
+}
+
+// Team accent colors by abbreviation — mirrored from the app's DesignTeamColors
+// (brightened for a dark canvas). Used for the *fallback* ring + the scorer dot.
+const ACCENTS: Record<string, string> = {
+	LA: "#E6447B",
+	BAY: "#2F80E8",
+	BOS: "#2FA85A",
+	CHI: "#6BA4FF",
+	DEN: "#239E80",
+	GFC: "#7FD4C1",
+	HOU: "#FF8A3D",
+	KC: "#30C7E8",
+	NC: "#E0354B",
+	SEA: "#6E7FFF",
+	ORL: "#B07CE8",
+	POR: "#FF4D6D",
+	LOU: "#C7A8FF",
+	SD: "#FFB340",
+	UTA: "#FFD60A",
+	WAS: "#FF4D5E",
+};
+
+function accent(abbr: string): string {
+	return ACCENTS[abbr.toUpperCase()] ?? "#8E8E93";
+}
+
+// Status pill per event (label + foreground + translucent background).
+function pill(event: string): { label: string; fg: string; bg: string } {
+	switch (event) {
+		case "halftime":
+			return { label: "HT", fg: "#FF9F0A", bg: "rgba(255,159,10,0.18)" };
+		case "fulltime":
+			return { label: "FT", fg: "#30D158", bg: "rgba(48,209,88,0.18)" };
+		default: // kickoff + goal are both live
+			return { label: "● LIVE", fg: "#FF453A", bg: "rgba(255,69,58,0.18)" };
+	}
+}
+
+// resvg-wasm needs its module initialized exactly once per isolate.
+let wasmReady: Promise<void> | null = null;
+function ensureWasm(): Promise<void> {
+	if (!wasmReady) wasmReady = initWasm(resvgWasm);
+	return wasmReady;
+}
+
+/** Base64-encode bytes in chunks (avoids a huge spread blowing the call stack). */
+function base64(bytes: Uint8Array): string {
+	let binary = "";
+	const chunk = 0x8000;
+	for (let i = 0; i < bytes.length; i += chunk) {
+		binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+	}
+	return btoa(binary);
+}
+
+/**
+ * Resolve one crest to a `data:` PNG URI (satori can't fetch URLs itself), or null
+ * if every image source failed (the caller then draws the ring+abbreviation).
+ */
+async function crestDataUri(env: CardEnv, abbr: string, espnId: string | undefined): Promise<string | null> {
+	const sources: string[] = [`${env.PROXY_BASE_URL.replace(/\/$/, "")}/crest?team=${encodeURIComponent(abbr)}`];
+	if (espnId) sources.push(`https://a.espncdn.com/i/teamlogos/soccer/500/${espnId}.png`);
+
+	for (let i = 0; i < sources.length; i++) {
+		try {
+			const res = await fetch(sources[i], { cf: { cacheEverything: true, cacheTtl: 86400 } });
+			if (!res.ok) {
+				console.log(`[card] crest source ${i} for ${abbr} → ${res.status}`);
+				continue;
+			}
+			const bytes = new Uint8Array(await res.arrayBuffer());
+			if (bytes.byteLength === 0) continue;
+			const mime = res.headers.get("content-type") || "image/png";
+			return `data:${mime};base64,${base64(bytes)}`;
+		} catch (err) {
+			console.log(`[card] crest source ${i} for ${abbr} threw: ${err}`);
+		}
+	}
+	console.log(`[card] crest fallback to ring+abbr for ${abbr}`);
+	return null;
+}
+
+// Minimal hyperscript so we can build satori's element tree without JSX/runtime.
+type Node = { type: string; props: Record<string, unknown> };
+function el(type: string, style: Record<string, unknown>, children?: unknown): Node {
+	return { type, props: { style, children } };
+}
+
+/** One team column: real badge artwork (no ring) when available, else ring+abbr. */
+function teamColumn(abbr: string, crest: string | null): Node {
+	const badge = crest
+		? // Real crest — drawn as-is, NO ring/circle/border (the spec is explicit).
+			{ type: "img", props: { src: crest, width: 60, height: 60, style: { objectFit: "contain" } } }
+		: // Fallback only: colored ring + abbreviation.
+			el(
+				"div",
+				{
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "center",
+					width: 60,
+					height: 60,
+					borderRadius: 30,
+					border: `3px solid ${accent(abbr)}`,
+					color: accent(abbr),
+					fontSize: 19,
+					fontWeight: 800,
+				},
+				abbr,
+			);
+	return el(
+		"div",
+		{ display: "flex", flexDirection: "column", alignItems: "center", gap: 9, width: 120 },
+		[badge, el("div", { fontSize: 15, fontWeight: 600, color: "rgba(255,255,255,0.8)" }, abbr)],
+	);
+}
+
+/** Build the full match-card SVG via satori. */
+async function renderSvg(env: CardEnv, opts: CardOptions): Promise<string> {
+	const [homeCrest, awayCrest] = await Promise.all([
+		crestDataUri(env, opts.homeAbbr, opts.homeId),
+		crestDataUri(env, opts.awayAbbr, opts.awayId),
+	]);
+	const p = pill(opts.event);
+	const showMinute = opts.minute != null && (opts.event === "goal" || opts.event === "kickoff");
+
+	const center = el(
+		"div",
+		{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 },
+		[
+			el(
+				"div",
+				{
+					fontSize: 15,
+					fontWeight: 800,
+					letterSpacing: 1.4,
+					textTransform: "uppercase",
+					color: p.fg,
+					backgroundColor: p.bg,
+					padding: "5px 14px",
+					borderRadius: 999,
+				},
+				p.label,
+			),
+			el("div", { fontSize: 56, fontWeight: 800, color: "#ffffff" }, `${opts.homeScore} – ${opts.awayScore}`),
+			showMinute
+				? el("div", { fontSize: 17, fontWeight: 600, color: "#FF9F0A" }, `${opts.minute}'`)
+				: el("div", { fontSize: 17, color: "transparent" }, "·"),
+		],
+	);
+
+	const body = el(
+		"div",
+		{
+			display: "flex",
+			flexDirection: "row",
+			alignItems: "center",
+			justifyContent: "space-between",
+			padding: "26px 30px 18px",
+		},
+		[teamColumn(opts.homeAbbr, homeCrest), center, teamColumn(opts.awayAbbr, awayCrest)],
+	);
+
+	const scorerText = opts.scorer ? `${opts.scorer}${opts.minute != null ? ` ${opts.minute}'` : ""}` : "";
+	const footer = el(
+		"div",
+		{
+			display: "flex",
+			flexDirection: "row",
+			alignItems: "center",
+			justifyContent: "space-between",
+			padding: "14px 30px",
+			borderTop: "1px solid rgba(255,255,255,0.08)",
+			backgroundColor: "rgba(0,0,0,0.18)",
+		},
+		[
+			el("div", { fontSize: 17, fontWeight: 700, letterSpacing: 2, color: "rgba(255,255,255,0.45)" }, "NWSL"),
+			scorerText
+				? el(
+						"div",
+						{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 },
+						[
+							el("div", { width: 9, height: 9, borderRadius: 5, backgroundColor: accent(opts.homeAbbr) }, ""),
+							el("div", { fontSize: 17, fontWeight: 600, color: "rgba(255,255,255,0.82)" }, scorerText),
+						],
+					)
+				: el("div", {}, ""),
+		],
+	);
+
+	const root = el(
+		"div",
+		{
+			display: "flex",
+			flexDirection: "column",
+			width: "100%",
+			height: "100%",
+			backgroundColor: "#13151d",
+			backgroundImage: "linear-gradient(158deg, #1d2030 0%, #0f1118 100%)",
+			fontFamily: "Inter",
+			color: "#ffffff",
+		},
+		[body, footer],
+	);
+
+	return satori(root as unknown as Parameters<typeof satori>[0], {
+		width: 720,
+		height: 296,
+		fonts: [
+			{ name: "Inter", data: inter400, weight: 400, style: "normal" },
+			{ name: "Inter", data: inter600, weight: 600, style: "normal" },
+			{ name: "Inter", data: inter800, weight: 800, style: "normal" },
+		],
+	});
+}
+
+function parseOptions(url: URL): CardOptions {
+	const matchId = url.pathname.slice("/card/".length);
+	const q = url.searchParams;
+	const num = (v: string | null) => {
+		const n = parseInt(v ?? "", 10);
+		return Number.isFinite(n) ? n : undefined;
+	};
+	return {
+		matchId,
+		event: q.get("e") ?? "goal",
+		homeAbbr: q.get("h") ?? "",
+		awayAbbr: q.get("a") ?? "",
+		homeScore: num(q.get("hs")) ?? 0,
+		awayScore: num(q.get("as")) ?? 0,
+		minute: num(q.get("min")),
+		scorer: q.get("sc") ?? undefined,
+		homeId: q.get("hid") ?? undefined,
+		awayId: q.get("aid") ?? undefined,
+	};
+}
+
+/**
+ * GET /card/<matchId>?e&h&a&hs&as&min&sc&hid&aid → match-card PNG.
+ *
+ * Cached at the edge keyed by the full URL (which encodes matchId/event/score), so
+ * one render serves every recipient of the same event and re-renders only when the
+ * score changes. A render failure returns 500 (loud) — the watcher then simply omits
+ * `imageUrl` so the NSE delivers the text-only notification (honest degrade, never a
+ * blank or a push that looks broken).
+ */
+export async function handleCard(request: Request, env: CardEnv, ctx: ExecutionContext): Promise<Response> {
+	const cache = caches.default;
+	const cached = await cache.match(request);
+	if (cached) return cached;
+
+	const url = new URL(request.url);
+	const opts = parseOptions(url);
+	if (!opts.homeAbbr || !opts.awayAbbr) {
+		return new Response("missing ?h and ?a", { status: 400 });
+	}
+
+	try {
+		await ensureWasm();
+		const svg = await renderSvg(env, opts);
+		const png = new Resvg(svg, { fitTo: { mode: "width", value: 720 } }).render().asPng();
+		// Copy into a fresh ArrayBuffer so the Response body is a plain BodyInit.
+		const body = png.slice().buffer;
+		const res = new Response(body, {
+			status: 200,
+			headers: {
+				"Content-Type": "image/png",
+				// Score is in the URL, so a given card is immutable → cache hard.
+				"Cache-Control": "public, max-age=86400",
+			},
+		});
+		ctx.waitUntil(cache.put(request, res.clone()));
+		return res;
+	} catch (err) {
+		console.log(`[card] render failed for ${opts.matchId} (${opts.event}): ${err}`);
+		return new Response(`card render failed: ${err}`, { status: 500 });
+	}
+}

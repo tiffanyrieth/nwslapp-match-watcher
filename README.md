@@ -38,7 +38,31 @@ would need a Durable Object alarm — a scale-only future optimization.
 - `GET /` — health/info string.
 - `POST /test-push` — send a **synthetic** push to one device, to verify on-device
   delivery before real matches resume. Guarded by the `x-trigger-secret` header.
-  Body: `{ "token": "<apns-device-token>", "title?": "...", "body?": "...", "eventID?": "..." }`.
+  Body: `{ "token", "title?", "subtitle?", "body?", "eventID?", "event?", "imageUrl?" }`.
+  When `imageUrl` is omitted it defaults to this worker's own `/card` render, so the
+  simplest call still produces the full rich (image-attached) notification.
+- `GET /card/<matchId>?e&h&a&hs&as&min&sc&hid&aid` — the server-rendered **match-card
+  PNG** (both crests + score + status pill) that rich pushes attach. See below.
+
+## Rich notifications (match card + NSE)
+
+A real match alert isn't bare text — it carries the two crests + the live score + the
+moment. On iOS that needs two pieces working together:
+
+1. **`GET /card`** renders a single PNG with **satori → SVG → resvg-wasm → PNG** (no
+   headless browser; fits a Worker). Crest resolution, so a crest is **never** missing:
+   self-hosted proxy `/crest?team=ABBR` (primary) → ESPN CDN by team id (`hid`/`aid`
+   fallback) → a colored ring + abbreviation drawn in the card (last resort only). A
+   real crest is drawn as-is, no ring. Cached at the edge by the full URL (which
+   encodes score), so one render serves every recipient. Inter faces are bundled as
+   Data modules; `nodejs_compat` is on (a satori dep references `process`).
+2. The app's **Notification Service Extension** (in `../NWSLApp/NotificationServiceExtension`)
+   wakes on `mutable-content: 1`, downloads `imageUrl`, and attaches it before display.
+
+**Payload contract** (`toPayload` in `src/events.ts`): `aps.alert.{title,subtitle?,body}`
++ `aps."mutable-content": 1` (REQUIRED — wakes the NSE) + `aps."thread-id": "match-<id>"`
+(stacks a match's events) + `aps."interruption-level": "time-sensitive"` (live events) +
+top-level `eventID` (kept for the iOS deep-link) + `matchId` + `event` + `imageUrl`.
 
 ## Deployment status
 
@@ -67,9 +91,12 @@ wrangler secret put SUPABASE_SERVICE_ROLE_KEY  # full-access; bypasses RLS
 npm run deploy
 ```
 
-**4. For TestFlight (production APNs):** change `vars.APNS_HOST` in `wrangler.jsonc`
-to `api.push.apple.com` and re-deploy. (Sandbox `api.sandbox.push.apple.com` is for
-a build run directly from Xcode; the device-token environment must match the host.)
+**4. APNs host — now PRODUCTION.** `vars.APNS_HOST` in `wrangler.jsonc` is set to
+`api.push.apple.com` (TestFlight/App Store builds mint production tokens). A device
+token registered by an Xcode **debug** build is a *sandbox* token and will silently
+fail with `BadDeviceToken` against this host — re-register from the TestFlight build
+(delete the old `device_tokens` row, open the app, let it re-register) before testing.
+Flip back to `api.sandbox.push.apple.com` only to test against an Xcode debug build.
 
 ## Verifying delivery (during the World Cup break, no live matches)
 
@@ -78,14 +105,24 @@ token → set `APNS_HOST` to `api.push.apple.com`):
 
 1. Sign in, enable **Goals** in Profile, grant notifications. The app uploads the
    device token to `device_tokens`. Read it there (or from the device log).
-2. Fire a synthetic goal:
+2. Fire a synthetic RICH goal (renders byte-identical to a live goal — appearance is
+   purely a function of the payload):
    ```sh
    curl -X POST https://nwslapp-match-watcher.tiffany-rieth.workers.dev/test-push \
      -H "x-trigger-secret: $MANUAL_TRIGGER_SECRET" \
      -H "content-type: application/json" \
-     -d '{"token":"<device-token>"}'
+     -d '{
+       "token": "<device-token>",
+       "event": "goal",
+       "title": "GOAL — WAS 1–0 ORL",
+       "subtitle": "WAS 1–0 ORL · 67'\''",
+       "body": "Washington Spirit scored.",
+       "eventID": "401853925",
+       "imageUrl": "https://nwslapp-match-watcher.tiffany-rieth.workers.dev/card/401853925?e=goal&h=WAS&a=ORL&hs=1&as=0&min=67&sc=S.%20Smith&hid=15365&aid=20905"
+     }'
    ```
-   A `GOAL — WAS 1–0 ORL` push should arrive; tapping it deep-links into the match.
+   The collapsed banner shows the crest thumbnail; expanding shows the composited
+   match-card (both crests + score + Live pill). Tapping deep-links into the match.
 
 When real matches resume, the cron path takes over automatically.
 

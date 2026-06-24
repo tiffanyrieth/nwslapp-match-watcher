@@ -2,6 +2,9 @@
 	"name": "nwslapp-match-watcher",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-06-01",
+	// satori (match-card renderer) pulls deps that reference `process` — nodejs_compat
+	// shims it (and other Node globals) on the Workers runtime.
+	"compatibility_flags": ["nodejs_compat"],
 	"observability": {
 		"enabled": true,
 	},
@@ -17,11 +20,21 @@
 			"id": "c00d44c4505844108c91f15282a4cfae",
 		},
 	],
-	// Non-secret config. APNS_HOST is sandbox by default (a build run from Xcode);
-	// flip it to api.push.apple.com for TestFlight/App Store builds, then re-deploy.
+	// The Inter woff faces the match-card renderer feeds to satori are imported as
+	// Data modules (ArrayBuffer). `.wasm` keeps its default CompiledWasm rule.
+	"rules": [
+		{ "type": "Data", "globs": ["**/*.woff"], "fallthrough": true },
+	],
+	// Non-secret config. APNS_HOST is PRODUCTION (TestFlight/App Store builds mint
+	// production device tokens; a sandbox host would 400 them with BadDeviceToken).
+	// Flip back to api.sandbox.push.apple.com only to test against an Xcode debug build.
 	"vars": {
-		"APNS_HOST": "api.sandbox.push.apple.com",
+		"APNS_HOST": "api.push.apple.com",
 		"APNS_BUNDLE_ID": "com.tiffanyrieth.nwslapp.NWSLApp",
+		// This worker's own public origin (where GET /card lives) → goes in `imageUrl`.
+		"WATCHER_PUBLIC_URL": "https://nwslapp-match-watcher.tiffany-rieth.workers.dev",
+		// The sibling proxy that serves the self-hosted crests (GET /crest?team=ABBR).
+		"PROXY_BASE_URL": "https://nwslapp-proxy.tiffany-rieth.workers.dev",
 	},
 	// Everything credential-bearing is a secret — set with `wrangler secret put <NAME>`
 	// (never committed). SUPABASE_URL + MANUAL_TRIGGER_SECRET are set during deploy;
