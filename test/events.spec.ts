@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	cardUrl,
 	detectEvents,
 	nextState,
 	parseMatch,
@@ -19,6 +20,7 @@ const match = (over: Partial<Match> = {}): Match => ({
 	statusName: "STATUS_FIRST_HALF",
 	period: 1,
 	clock: 600,
+	plays: [],
 	...over,
 });
 
@@ -201,12 +203,116 @@ describe("nextState", () => {
 	});
 });
 
-describe("toPayload", () => {
-	it("wraps title/body + the deep-link eventID", () => {
+describe("parseMatch - scoring plays", () => {
+	it("extracts scorer + minute from the scoreboard details", () => {
+		const m = parseMatch({
+			id: "401853925",
+			status: { type: { state: "in", name: "STATUS_SECOND_HALF" } },
+			competitions: [
+				{
+					competitors: [
+						{ homeAway: "home", score: "2", team: { id: "15365", abbreviation: "WAS", displayName: "Washington Spirit" } },
+						{ homeAway: "away", score: "1", team: { id: "20905", abbreviation: "ORL", displayName: "Orlando Pride" } },
+					],
+					details: [
+						{ scoringPlay: true, team: { id: "15365" }, clock: { displayValue: "67'" }, athletesInvolved: [{ displayName: "Sophia Smith", shortName: "S. Smith" }] },
+					],
+				},
+			],
+		});
+		expect(m?.plays).toEqual([{ teamId: "15365", scorer: "S. Smith", minute: 67 }]);
+	});
+
+	it("ignores non-scoring details and tolerates a missing scorer/clock", () => {
+		const m = parseMatch({
+			id: "1",
+			status: { type: { state: "in" } },
+			competitions: [
+				{
+					competitors: [
+						{ homeAway: "home", score: "1", team: { id: "15365" } },
+						{ homeAway: "away", score: "0", team: { id: "20905" } },
+					],
+					details: [
+						{ scoringPlay: false, team: { id: "15365" } }, // a card, not a goal
+						{ scoringPlay: true, team: { id: "15365" } }, // goal, no athlete/clock
+					],
+				},
+			],
+		});
+		expect(m?.plays).toEqual([{ teamId: "15365", scorer: undefined, minute: undefined }]);
+	});
+});
+
+describe("detectEvents - scorer attribution", () => {
+	it("names the scorer in the body + subtitle + minute when ESPN attributes it", () => {
+		const scored = withScores(1, 0, {
+			plays: [{ teamId: "15365", scorer: "S. Smith", minute: 67 }],
+		});
+		const [goal] = detectEvents(stored(withScores(0, 0)), scored);
+		expect(goal.body).toBe("S. Smith scored.");
+		expect(goal.subtitle).toBe("WAS 1–0 ORL · 67'");
+		expect(goal.scorer).toBe("S. Smith");
+		expect(goal.minute).toBe(67);
+	});
+
+	it("falls back to the club name (no fabrication) when unattributed", () => {
 		const [goal] = detectEvents(stored(withScores(0, 0)), withScores(1, 0));
-		const payload = toPayload(goal) as { aps: { alert: { title: string }; "thread-id": string }; eventID: string };
+		expect(goal.body).toBe("Washington Spirit scored.");
+		expect(goal.subtitle).toBe("WAS 1–0 ORL");
+		expect(goal.scorer).toBeUndefined();
+	});
+});
+
+describe("cardUrl", () => {
+	it("encodes event + abbreviations + score + ids; omits absent minute/scorer", () => {
+		const [kickoff] = detectEvents(null, match({ period: 1, clock: 30 }));
+		const url = new URL(cardUrl("https://w.example", kickoff));
+		expect(url.pathname).toBe("/card/401853925");
+		expect(url.searchParams.get("e")).toBe("kickoff");
+		expect(url.searchParams.get("h")).toBe("WAS");
+		expect(url.searchParams.get("a")).toBe("ORL");
+		expect(url.searchParams.get("hid")).toBe("15365");
+		expect(url.searchParams.get("min")).toBeNull();
+	});
+
+	it("carries minute + scorer for an attributed goal", () => {
+		const scored = withScores(2, 1, { plays: [{ teamId: "15365", scorer: "S. Smith", minute: 67 }] });
+		const [goal] = detectEvents(stored(withScores(1, 1)), scored);
+		const url = new URL(cardUrl("https://w.example/", goal));
+		expect(url.searchParams.get("min")).toBe("67");
+		expect(url.searchParams.get("sc")).toBe("S. Smith");
+		expect(url.searchParams.get("hs")).toBe("2");
+		expect(url.searchParams.get("as")).toBe("1");
+	});
+});
+
+describe("toPayload", () => {
+	const cardBase = "https://nwslapp-match-watcher.example";
+
+	it("builds the rich contract: alert + mutable-content + thread-id + level + imageUrl", () => {
+		const [goal] = detectEvents(stored(withScores(0, 0)), withScores(1, 0));
+		const payload = toPayload(goal, cardBase) as {
+			aps: { alert: { title: string }; "mutable-content": number; "thread-id": string; "interruption-level": string };
+			eventID: string;
+			matchId: string;
+			event: string;
+			imageUrl: string;
+		};
 		expect(payload.aps.alert.title).toBe("GOAL — WAS 1–0 ORL");
-		expect(payload.eventID).toBe("401853925");
-		expect(payload.aps["thread-id"]).toBe("401853925");
+		expect(payload.aps["mutable-content"]).toBe(1);
+		// thread-id is prefixed so a match's events stack together.
+		expect(payload.aps["thread-id"]).toBe("match-401853925");
+		expect(payload.aps["interruption-level"]).toBe("time-sensitive");
+		expect(payload.eventID).toBe("401853925"); // kept for the iOS deep-link
+		expect(payload.matchId).toBe("401853925");
+		expect(payload.event).toBe("goal");
+		expect(payload.imageUrl.startsWith(`${cardBase}/card/401853925?`)).toBe(true);
+	});
+
+	it("includes the subtitle only when the event has one", () => {
+		const [kickoff] = detectEvents(null, match({ period: 1, clock: 30 }));
+		const payload = toPayload(kickoff, cardBase) as { aps: { alert: { subtitle?: string } } };
+		expect(payload.aps.alert.subtitle).toBeUndefined();
 	});
 });
