@@ -20,6 +20,16 @@
 			"id": "c00d44c4505844108c91f15282a4cfae",
 		},
 	],
+	// Service binding to the sibling proxy. A plain fetch to the proxy's workers.dev URL
+	// fails with Cloudflare error 1042 (same-account Worker→Worker over workers.dev is
+	// not allowed); the binding routes subrequests in-process. Used for the scoreboard
+	// diff and the self-hosted crest fetch.
+	"services": [
+		{
+			"binding": "PROXY",
+			"service": "nwslapp-proxy",
+		},
+	],
 	// The Inter woff faces the match-card renderer feeds to satori are imported as
 	// Data modules (ArrayBuffer). `.wasm` keeps its default CompiledWasm rule.
 	"rules": [
@@ -33,8 +43,8 @@
 		"APNS_BUNDLE_ID": "com.tiffanyrieth.nwslapp.NWSLApp",
 		// This worker's own public origin (where GET /card lives) → goes in `imageUrl`.
 		"WATCHER_PUBLIC_URL": "https://nwslapp-match-watcher.tiffany-rieth.workers.dev",
-		// The sibling proxy that serves the self-hosted crests (GET /crest?team=ABBR).
-		"PROXY_BASE_URL": "https://nwslapp-proxy.tiffany-rieth.workers.dev",
+		// The proxy is reached via the PROXY service binding (see "services" above), not a
+		// var — same-account Worker→Worker over workers.dev fails with Cloudflare error 1042.
 	},
 	// Everything credential-bearing is a secret — set with `wrangler secret put <NAME>`
 	// (never committed). SUPABASE_URL + MANUAL_TRIGGER_SECRET are set during deploy;
