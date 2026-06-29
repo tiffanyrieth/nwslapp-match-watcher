@@ -22,8 +22,10 @@ import inter600 from "./fonts/inter-600.woff";
 import inter800 from "./fonts/inter-800.woff";
 
 interface CardEnv {
-	/** Proxy origin — its GET /crest?team=ABBR serves the self-hosted bundled crests. */
-	PROXY_BASE_URL: string;
+	/** Service binding to the sibling proxy worker — its GET /crest/{ABBR} serves the
+	 *  self-hosted crests. A binding (not a workers.dev fetch) is required: same-account
+	 *  Worker→Worker over the public URL fails with Cloudflare error 1042. */
+	PROXY: Fetcher;
 }
 
 /** Parsed /card query → render inputs. */
@@ -38,6 +40,7 @@ interface CardOptions {
 	scorer?: string;
 	homeId?: string; // ESPN team id (for crest fallback)
 	awayId?: string;
+	comp: string; // competition label for the footer (default "NWSL")
 }
 
 // Team accent colors by abbreviation — mirrored from the app's DesignTeamColors
@@ -99,12 +102,21 @@ function base64(bytes: Uint8Array): string {
  * if every image source failed (the caller then draws the ring+abbreviation).
  */
 async function crestDataUri(env: CardEnv, abbr: string, espnId: string | undefined): Promise<string | null> {
-	const sources: string[] = [`${env.PROXY_BASE_URL.replace(/\/$/, "")}/crest?team=${encodeURIComponent(abbr)}`];
-	if (espnId) sources.push(`https://a.espncdn.com/i/teamlogos/soccer/500/${espnId}.png`);
+	// Self-hosted crest via the PROXY SERVICE BINDING (source 0), ESPN CDN by team id as
+	// the fallback (source 1). The binding is essential: a plain fetch to the proxy's
+	// workers.dev URL returns Cloudflare error 1042 (same-account Worker→Worker over the
+	// public URL is blocked) — that 404 page, not a missing crest, is what made the
+	// self-hosted crest appear "dead" and every card fall back to the ring. The binding
+	// routes the subrequest in-process to the proxy. (Host in the URL is ignored by the
+	// binding; only the path matters.)
+	const sources: Array<() => Promise<Response>> = [
+		() => env.PROXY.fetch(`https://proxy/crest/${encodeURIComponent(abbr)}`),
+	];
+	if (espnId) sources.push(() => fetch(`https://a.espncdn.com/i/teamlogos/soccer/500/${espnId}.png`));
 
 	for (let i = 0; i < sources.length; i++) {
 		try {
-			const res = await fetch(sources[i], { cf: { cacheEverything: true, cacheTtl: 86400 } });
+			const res = await sources[i]();
 			if (!res.ok) {
 				console.log(`[card] crest source ${i} for ${abbr} → ${res.status}`);
 				continue;
@@ -215,7 +227,7 @@ async function renderSvg(env: CardEnv, opts: CardOptions): Promise<string> {
 			backgroundColor: "rgba(0,0,0,0.18)",
 		},
 		[
-			el("div", { fontSize: 17, fontWeight: 700, letterSpacing: 2, color: "rgba(255,255,255,0.45)" }, "NWSL"),
+			el("div", { fontSize: 17, fontWeight: 700, letterSpacing: 2, color: "rgba(255,255,255,0.45)" }, opts.comp),
 			scorerText
 				? el(
 						"div",
@@ -273,6 +285,7 @@ function parseOptions(url: URL): CardOptions {
 		scorer: q.get("sc") ?? undefined,
 		homeId: q.get("hid") ?? undefined,
 		awayId: q.get("aid") ?? undefined,
+		comp: q.get("comp") ?? "NWSL",
 	};
 }
 
