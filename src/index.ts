@@ -49,15 +49,18 @@ export interface Env {
 	/** This worker's own public origin (where GET /card lives) — goes in `imageUrl`. */
 	WATCHER_PUBLIC_URL: string;
 
-	/** Base origin of the sibling proxy (its GET /crest?team= serves the bundled crests). */
-	PROXY_BASE_URL: string;
+	/** Service binding to the sibling proxy (its /scoreboard + /crest routes). A binding,
+	 *  not a workers.dev fetch: same-account Worker→Worker over the public URL fails with
+	 *  Cloudflare error 1042. The URL host is ignored by the binding; only the path matters. */
+	PROXY: Fetcher;
 
 	/** Shared secret guarding the manual /test-push route. */
 	MANUAL_TRIGGER_SECRET: string;
 }
 
-// The sibling proxy's scoreboard route — shared edge cache, transparent ESPN bytes.
-const PROXY_SCOREBOARD = "https://nwslapp-proxy.tiffany-rieth.workers.dev/scoreboard";
+// The sibling proxy's scoreboard route, reached via the PROXY service binding (host is
+// ignored by the binding — only the path matters). Shared edge cache, transparent ESPN bytes.
+const PROXY_SCOREBOARD = "https://proxy/scoreboard";
 const MATCH_STATE_TTL = 21600; // 6h — auto-expires a match's KV entry after it ends.
 
 // V2 Live Activity timing.
@@ -133,7 +136,7 @@ async function runWatch(env: Env): Promise<void> {
 	const now = Date.now();
 	let events: ScoreboardEvent[];
 	try {
-		const res = await fetch(`${PROXY_SCOREBOARD}?dates=${year}0101-${year}1231&limit=500`, {
+		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${year}0101-${year}1231&limit=500`, {
 			headers: { Accept: "application/json" },
 		});
 		if (!res.ok) {
