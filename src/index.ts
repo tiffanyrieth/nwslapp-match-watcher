@@ -357,3 +357,68 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 		headers: { "Content-Type": "application/json" },
 	});
 }
+
+/**
+ * Manual trigger for V2 Live Activities — the on-device verification path (mirrors /test-push).
+ * Body: { mode: "start"|"update"|"end", token, matchId?, h?, a?, hs?, as?, phase?, min?, sc?, comp? }.
+ *   - mode "start": `token` is the device's push-to-start token (from live_activity_start_tokens);
+ *     creates the Activity with the given attributes + initial state.
+ *   - mode "update"/"end": `token` is the per-Activity token (from live_activities, written by the app
+ *     once the Activity is running); pushes a new content-state / ends it.
+ * Fire a sequence (start → update goal → update HT → … → end) to walk the full lifecycle on device.
+ */
+async function handleTestActivity(request: Request, env: Env): Promise<Response> {
+	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
+		return new Response("Forbidden.", { status: 403 });
+	}
+	let p: {
+		mode?: "start" | "update" | "end";
+		token?: string;
+		matchId?: string;
+		h?: string;
+		a?: string;
+		hs?: number;
+		as?: number;
+		phase?: LivePhase;
+		min?: number;
+		sc?: string;
+		comp?: string;
+	};
+	try {
+		p = (await request.json()) as typeof p;
+	} catch {
+		return new Response("Bad JSON.", { status: 400 });
+	}
+	if (!p.token) return new Response("Missing 'token'.", { status: 400 });
+
+	const apns = apnsConfig(env);
+	const jwt = await apnsJwt(apns);
+	const nowSec = Math.floor(Date.now() / 1000);
+	const phase: LivePhase = p.phase ?? "live";
+	const running = phase === "live" || phase === "extraTime";
+	const state: LiveContentState = {
+		homeScore: p.hs ?? 0,
+		awayScore: p.as ?? 0,
+		phase,
+		clockStartEpoch: running ? nowSec - (p.min ?? 1) * 60 : undefined,
+		staticLabel:
+			phase === "pre" ? "3:00 PM" : phase === "halftime" ? "HT" : phase === "fulltime" ? "FT" : undefined,
+		lastScorer: p.sc,
+		broadcast: "Paramount+",
+	};
+
+	const mode = p.mode ?? "start";
+	let result;
+	if (mode === "start") {
+		const attrs = attributesFor(p.matchId ?? "test-match", p.h ?? "ORL", p.a ?? "POR", p.comp ?? "NWSL");
+		result = await startLiveActivity(p.token, attrs, state, jwt, apns);
+	} else if (mode === "end") {
+		result = await endLiveActivity(p.token, state, jwt, apns, nowSec + LA_DISMISS_AFTER_S);
+	} else {
+		result = await updateLiveActivity(p.token, state, jwt, apns);
+	}
+	return new Response(JSON.stringify({ mode, ...result }, null, 2), {
+		status: result.ok ? 200 : 502,
+		headers: { "Content-Type": "application/json" },
+	});
+}

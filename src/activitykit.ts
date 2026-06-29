@@ -43,8 +43,8 @@ function liveTopic(cfg: ApnsConfig): string {
 }
 
 /** Drop undefined/null so we never push a null clockStartEpoch / staticLabel into content-state. */
-function compact<T extends Record<string, unknown>>(o: T): T {
-	return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null)) as T;
+function compact<T extends object>(o: T): Record<string, unknown> {
+	return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null));
 }
 
 /** Low-level send to the Live Activity channel. Never throws — returns the per-token result. */
