@@ -78,3 +78,34 @@ export async function tokensForEvent(
 	);
 	return uniq(tokens.map((r) => r.token));
 }
+
+// ── V2 Live Activity tokens ──────────────────────────────────────────────────
+// The Live Activity is the persistent "glance" surface for the WHOLE match, so it's gated only on the
+// per-team bell (team_alert_preferences.alerts_enabled) — NOT the per-event notification_preferences
+// columns (those gate individual V1 pushes). One opt-in (notifications ON) drives both layers (spec §00b).
+
+/** Per-Activity UPDATE tokens for a match (live_activities) — the running Activities to update/end. */
+export async function activityTokensForMatch(cfg: SupabaseConfig, matchId: string): Promise<string[]> {
+	const rows = await rest<{ push_token: string }>(
+		cfg,
+		`live_activities?match_id=eq.${encodeURIComponent(matchId)}&select=push_token`,
+	);
+	return uniq(rows.map((r) => r.push_token));
+}
+
+/** Push-to-START tokens to remote-create a Live Activity: users with match alerts ON for EITHER team
+ *  who have registered an ActivityKit push-to-start token (live_activity_start_tokens). */
+export async function startTokensForTeams(cfg: SupabaseConfig, teamIds: string[]): Promise<string[]> {
+	if (teamIds.length === 0) return [];
+	const alertRows = await rest<{ user_id: string }>(
+		cfg,
+		`team_alert_preferences?team_id=in.${inList(teamIds)}&alerts_enabled=eq.true&select=user_id`,
+	);
+	const ids = uniq(alertRows.map((r) => r.user_id));
+	if (ids.length === 0) return [];
+	const rows = await rest<{ token: string }>(
+		cfg,
+		`live_activity_start_tokens?user_id=in.${inList(ids)}&select=token`,
+	);
+	return uniq(rows.map((r) => r.token));
+}
