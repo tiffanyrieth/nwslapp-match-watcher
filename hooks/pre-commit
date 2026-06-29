@@ -1,0 +1,28 @@
+#!/bin/sh
+#
+# pre-commit — prevent accidental commits straight onto the default branch.
+#
+# Why: the project workflow (see CLAUDE.md) is "never work on main — branch
+# first, merge via PR." Nothing in git enforces that by default, so a
+# distracted `git commit` while sitting on main slips right through. This hook
+# is the tripwire for exactly that mistake.
+#
+# This is a local guardrail, NOT a security control: it only runs on this
+# machine, and you can bypass it on purpose with `git commit --no-verify`.
+#
+
+protected="main"
+branch=$(git symbolic-ref --short -q HEAD)
+
+if [ "$branch" = "$protected" ]; then
+    echo "" >&2
+    echo "✋ You're about to commit directly onto '$protected'." >&2
+    echo "   Project rule: branch first." >&2
+    echo "     git checkout -b feature/<short-description>" >&2
+    echo "" >&2
+    echo "   (To override on purpose: git commit --no-verify)" >&2
+    echo "" >&2
+    exit 1
+fi
+
+exit 0
