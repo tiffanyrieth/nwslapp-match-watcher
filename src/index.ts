@@ -24,9 +24,11 @@
  */
 
 import { apnsJwt, sendApns, type ApnsConfig } from "./apns";
-import { detectEvents, nextState, parseMatch, toPayload, type ScoreboardEvent, type StoredState } from "./events";
+import { detectEvents, nextState, parseMatch, toPayload, type Match, type ScoreboardEvent, type StoredState } from "./events";
 import { handleCard } from "./card";
-import { tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activityTokensForMatch, startTokensForTeams, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { endLiveActivity, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
+import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
 
 export interface Env {
 	/** KV namespace holding per-match last-known scores (key `match:{eventId}`). */
@@ -57,6 +59,11 @@ export interface Env {
 // The sibling proxy's scoreboard route — shared edge cache, transparent ESPN bytes.
 const PROXY_SCOREBOARD = "https://nwslapp-proxy.tiffany-rieth.workers.dev/scoreboard";
 const MATCH_STATE_TTL = 21600; // 6h — auto-expires a match's KV entry after it ends.
+
+// V2 Live Activity timing.
+const LA_START_LEAD_MS = 5 * 60 * 1000; // remote-start the Activity ≤5 min before kickoff
+const LA_RESYNC_MS = 10 * 60 * 1000; // clock-drift resync cadence (the widget's local timer ticks between)
+const LA_DISMISS_AFTER_S = 15 * 60; // keep the FT card on the lock screen ~15 min, then dismiss
 
 function apnsConfig(env: Env): ApnsConfig {
 	return {
@@ -96,6 +103,10 @@ export default {
 
 		if (request.method === "POST" && url.pathname === "/test-push") {
 			return handleTestPush(request, env);
+		}
+
+		if (request.method === "POST" && url.pathname === "/test-activity") {
+			return handleTestActivity(request, env);
 		}
 
 		return new Response("Not found.", { status: 404 });
@@ -175,6 +186,14 @@ async function runWatch(env: Env): Promise<void> {
 
 		// Persist the new state while live; clean up once the match has ended (so a
 		// later "post" tick is skipped by the no-prev guard above — no duplicate FT).
+		// V2 Live Activity (ADDITIVE — the V1 push path above is untouched). Pushes the current
+		// state to this match's running Activities on an event / full-time / periodic resync.
+		try {
+			await syncLiveActivity(env, sb, apns, match, detected.length > 0);
+		} catch (err) {
+			console.log(`[watcher] LA sync failed (${match.eventId}): ${err}`);
+		}
+
 		if (match.state === "post") {
 			await env.MATCH_STATE.delete(key);
 		} else {
@@ -182,6 +201,87 @@ async function runWatch(env: Env): Promise<void> {
 				expirationTtl: MATCH_STATE_TTL,
 			});
 		}
+	}
+
+	// SEPARATE pass (not tangled into detectEvents): remote-start a Live Activity for any match
+	// kicking off within the next ~5 min that a signed-in user has alerts ON for. KV-deduped.
+	try {
+		await startUpcomingActivities(env, events, sb, apns);
+	} catch (err) {
+		console.log(`[watcher] LA start pass failed: ${err}`);
+	}
+}
+
+/** V2: push the current match state to its running Activities (UPDATE), END them at full time, or skip
+ *  when only the local clock needs to tick. Resync is throttled (LA_RESYNC_MS) so we don't push per poll. */
+async function syncLiveActivity(
+	env: Env,
+	sb: SupabaseConfig,
+	apns: ApnsConfig,
+	match: Match,
+	hadEvent: boolean,
+): Promise<void> {
+	const ended = match.state === "post";
+	const rsKey = `la-rs:${match.eventId}`;
+	if (!ended && !hadEvent) {
+		const last = await env.MATCH_STATE.get(rsKey);
+		if (last && Date.now() - Number(last) < LA_RESYNC_MS) return; // the widget's local timer covers it
+	}
+	const tokens = await activityTokensForMatch(sb, match.eventId);
+	if (tokens.length === 0) return;
+	const jwt = await apnsJwt(apns);
+	const state: LiveContentState = contentStateFromMatch(match);
+	if (ended) {
+		const dismissAt = Math.floor(Date.now() / 1000) + LA_DISMISS_AFTER_S;
+		await Promise.all(tokens.map((t) => endLiveActivity(t, state, jwt, apns, dismissAt)));
+		await env.MATCH_STATE.delete(rsKey);
+		console.log(`[watcher] LA end ${match.eventId}: ${tokens.length} activities`);
+	} else {
+		await Promise.all(tokens.map((t) => updateLiveActivity(t, state, jwt, apns)));
+		await env.MATCH_STATE.put(rsKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
+	}
+}
+
+/** SEPARATE start trigger (NOT detectEvents): for matches ≤5 min pre-kickoff, remote-start a Live
+ *  Activity for everyone with alerts ON for a participating team + a push-to-start token. KV-deduped. */
+async function startUpcomingActivities(
+	env: Env,
+	events: ScoreboardEvent[],
+	sb: SupabaseConfig,
+	apns: ApnsConfig,
+): Promise<void> {
+	const now = Date.now();
+	for (const event of events) {
+		const ko = kickoffMs(event);
+		if (ko === null || ko < now || ko - now > LA_START_LEAD_MS) continue;
+		const info = upcomingInfo(event);
+		if (!info) continue;
+		const startedKey = `la-start:${info.matchId}`;
+		if (await env.MATCH_STATE.get(startedKey)) continue;
+		let tokens: string[];
+		try {
+			tokens = await startTokensForTeams(sb, [info.homeId, info.awayId]);
+		} catch (err) {
+			console.log(`[watcher] LA start lookup failed (${info.matchId}): ${err}`);
+			continue;
+		}
+		if (tokens.length === 0) continue; // no opt-ins yet — retry next poll, still inside the window
+		const jwt = await apnsJwt(apns);
+		const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr);
+		const state = preContentState(kickoffLabel(ko));
+		const results = await Promise.all(tokens.map((t) => startLiveActivity(t, attrs, state, jwt, apns)));
+		const ok = results.filter((r) => r.ok).length;
+		console.log(`[watcher] LA start ${info.homeAbbr} vs ${info.awayAbbr}: ${ok}/${tokens.length}`);
+		await env.MATCH_STATE.put(startedKey, String(now), { expirationTtl: MATCH_STATE_TTL });
+	}
+}
+
+/** Scheduled kickoff time as a short US-Eastern label ("3:00 PM") for the pre-match Activity. */
+function kickoffLabel(ko: number): string {
+	try {
+		return new Date(ko).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" });
+	} catch {
+		return "Kickoff soon";
 	}
 }
 
