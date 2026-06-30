@@ -93,6 +93,13 @@ export async function activityTokensForMatch(cfg: SupabaseConfig, matchId: strin
 	return uniq(rows.map((r) => r.push_token));
 }
 
+/** EVERY registered V1 device token, unfiltered. Used ONLY by the manual /test-push fan-out (a synthetic
+ *  test match has no team_alert_preferences rows, so the normal tokensForEvent gate can't apply). */
+export async function allDeviceTokens(cfg: SupabaseConfig): Promise<string[]> {
+	const rows = await rest<{ token: string }>(cfg, `device_tokens?select=token`);
+	return uniq(rows.map((r) => r.token));
+}
+
 /** EVERY registered push-to-start token, unfiltered by team. Used ONLY by the manual replay/test path:
  *  a synthetic match has no team_alert_preferences rows, so the per-team gate `startTokensForTeams`
  *  uses can't apply — the test tool deliberately fans out to all devices. Not used by the cron. */

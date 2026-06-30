@@ -38,7 +38,7 @@ import {
 	type StoredState,
 } from "./events";
 import { handleCard } from "./card";
-import { activityTokensForMatch, allStartTokens, startTokensForTeams, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activityTokensForMatch, allDeviceTokens, allStartTokens, startTokensForTeams, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { endLiveActivity, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
 
@@ -383,10 +383,6 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	} catch {
 		return new Response("Bad JSON.", { status: 400 });
 	}
-	if (!payload.token) {
-		return new Response("Missing 'token'.", { status: 400 });
-	}
-
 	const apns = apnsConfig(env);
 	const jwt = await apnsJwt(apns);
 	const eventID = payload.eventID ?? "401853925";
@@ -402,27 +398,42 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	};
 	if (payload.subtitle) alert.subtitle = payload.subtitle;
 
-	const result = await sendApns(
-		payload.token,
-		{
-			aps: {
-				alert,
-				"mutable-content": 1,
-				sound: "default",
-				"thread-id": `match-${eventID}`,
-				"interruption-level": "time-sensitive",
-			},
-			eventID,
-			matchId: eventID,
-			event,
-			imageUrl,
+	const aps = {
+		aps: {
+			alert,
+			"mutable-content": 1,
+			sound: "default",
+			"thread-id": `match-${eventID}`, // same eventID across goal + correction → they stack
+			"interruption-level": "time-sensitive",
 		},
-		jwt,
-		apns,
-	);
+		eventID,
+		matchId: eventID,
+		event,
+		imageUrl,
+	};
 
-	return new Response(JSON.stringify(result, null, 2), {
-		status: result.ok ? 200 : 502,
+	// `token` present → that one device (back-compat). Omitted → fan out to ALL registered V1 device
+	// tokens (the replay/correction test, mirroring /test-activity). Service-role read stays server-side.
+	let tokens: string[];
+	try {
+		tokens = payload.token ? [payload.token] : await allDeviceTokens(supabaseConfig(env));
+	} catch (err) {
+		return new Response(JSON.stringify({ error: `token resolution failed: ${String(err)}` }, null, 2), {
+			status: 502,
+			headers: { "Content-Type": "application/json" },
+		});
+	}
+	if (tokens.length === 0) {
+		return new Response(JSON.stringify({ tokenCount: 0, okCount: 0, results: [], note: "No registered device tokens." }, null, 2), {
+			status: 502,
+			headers: { "Content-Type": "application/json" },
+		});
+	}
+
+	const results = await Promise.all(tokens.map((t) => sendApns(t, aps, jwt, apns)));
+	const okCount = results.filter((r) => r.ok).length;
+	return new Response(JSON.stringify({ event, tokenCount: tokens.length, okCount, results }, null, 2), {
+		status: okCount > 0 ? 200 : 502,
 		headers: { "Content-Type": "application/json" },
 	});
 }

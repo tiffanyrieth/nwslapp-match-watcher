@@ -77,6 +77,8 @@ node scripts/replay.mjs --dry-run                       # print timeline + sched
 MANUAL_TRIGGER_SECRET=<secret> node scripts/replay.mjs  # live: the team's latest finished match
 # flags: --event=<id> --fixture --minutes=10 --team=WAS --match-id=replay-test
 #        --start-hold=30 --start-only --updates-only
+#        --correction   VAR test: fire the last goal as a V1 push, then DISALLOW it (correction
+#                       push w/ red card + struck score, stacks via thread-id, + silent LA rollback)
 ```
 
 **Per-Activity token timing (gotcha):** push-to-start creates the lock-screen Activity even with the
