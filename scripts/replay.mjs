@@ -27,6 +27,13 @@
  *   ... --minutes=10         total wall-clock duration (default 10)
  *   ... --team=WAS           which team's latest match to pick (default WAS)
  *   ... --match-id=replay-test   synthetic matchId isolating test rows from real matches (default)
+ *   ... --start-hold=30      seconds after start before the first update (token-registration window)
+ *   ... --start-only         fire only the start (register the per-Activity token), then stop
+ *   ... --updates-only       skip start; drive kickoff→end against an ALREADY-running Activity
+ *
+ * NOTE: a push-started Activity uploads its per-Activity update token to Supabase only while the app is
+ * RUNNING to observe it. Keep the test phone's app OPEN around the start, or use --start-only (open app,
+ * confirm a live_activities row) then --updates-only to drive the rest.
  *
  * ENV: MANUAL_TRIGGER_SECRET (required unless --dry-run), WATCHER_URL, PROXY_URL (sensible defaults below).
  */
@@ -44,7 +51,6 @@ const SECRET = process.env.MANUAL_TRIGGER_SECRET ?? process.env.TRIGGER_SECRET ?
 const FIXTURE_PATH = resolve(__dirname, "../../NWSLApp/NWSLAppTests/Fixtures/summary.json");
 
 // Scheduling constants.
-const START_HOLD_S = 12; // start → first update: time for devices to receive the start push and register
 const END_HOLD_S = 12; //   keep the FT card visible before the end/dismiss push
 const MIN_GAP_S = 10; //    floor between any two consecutive sends
 const MATCH_SPAN_MIN = 95; // map real minutes 0..95 onto the wall-clock budget
@@ -57,7 +63,7 @@ const val = (k, d) => {
 	return a ? a.slice(k.length + 3) : d;
 };
 if (has("--help") || has("-h")) {
-	console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 38).join("\n").replace(/^ \*?/gm, ""));
+	console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 46).join("\n").replace(/^ \*?/gm, ""));
 	process.exit(0);
 }
 const DRY = has("--dry-run");
@@ -66,6 +72,14 @@ const PINNED_EVENT = val("event", null);
 const TOTAL_MIN = Number(val("minutes", "10"));
 const TEAM = val("team", "WAS").toUpperCase();
 const MATCH_ID = val("match-id", "replay-test");
+// start → first update: time for devices to receive the start push, create the Activity, and upload the
+// per-Activity token. Push-to-start only uploads that token while the app is RUNNING to observe it, so
+// keep the app foregrounded on the test phone; 30s is comfortable. Raise with --start-hold for a slow link.
+const START_HOLD_S = Number(val("start-hold", "30"));
+// Two-phase helpers: --start-only fires just the start (register the per-Activity token, then stop);
+// --updates-only skips the start and drives kickoff→end against an ALREADY-running Activity.
+const START_ONLY = has("--start-only");
+const UPDATES_ONLY = has("--updates-only");
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -208,7 +222,7 @@ async function send(step, h, a) {
 		body: JSON.stringify(body),
 	});
 	const out = await res.json().catch(() => ({}));
-	const fails = (out.results ?? []).filter((r) => !r.ok).map((r) => `${r.status}:${r.reason ?? "?"}`);
+	const fails = (out.results ?? []).filter((r) => !r.ok).map((r) => `${r.status}:${r.reason ?? "?"}(…${String(r.token ?? "").slice(-8)})`);
 	const tag = out.error ? `ERROR: ${out.error}` : `${out.okCount ?? 0}/${out.tokenCount ?? 0} ok`;
 	console.log(`  [${fmtClock(step.offsetSec)}] ${mode.padEnd(6)} ${step.label.padEnd(34)} → HTTP ${res.status} (${tag})${fails.length ? "  fails: " + fails.join(", ") : ""}`);
 	return { httpOk: res.ok, tokenCount: out.tokenCount ?? 0, error: out.error };
@@ -223,7 +237,9 @@ async function main() {
 	}
 
 	const { summary, eventId } = await resolveSummary();
-	const { steps, h, a } = buildTimeline(summary);
+	let { steps, h, a } = buildTimeline(summary);
+	if (START_ONLY) steps = steps.filter((s) => s.kind === "pre");
+	else if (UPDATES_ONLY) steps = steps.filter((s) => s.kind !== "pre");
 	schedule(steps);
 
 	console.log(`\n▶ Schedule (${steps.length} steps, ${h} home / ${a} away, event ${eventId}):`);
@@ -236,20 +252,33 @@ async function main() {
 
 	console.log(`\n▶ Driving the lifecycle (watch both phones)…\n`);
 	let t0 = Date.now();
+	let warnedNoActivity = false;
 	for (let i = 0; i < steps.length; i++) {
-		const wait = steps[i].offsetSec * 1000 - (Date.now() - t0);
+		const step = steps[i];
+		const wait = step.offsetSec * 1000 - (Date.now() - t0);
 		if (wait > 0) await sleep(wait);
-		const r = await send(steps[i], h, a);
-		if (i === 0 && !r.httpOk) {
-			if (r.error) {
-				console.error(`\n✗ Start fan-out errored server-side. Aborting.\n   ${r.error}`);
-			} else {
-				console.error("\n✗ Start fan-out reached 0 devices (no push-to-start tokens registered). Aborting.\n   → Confirm the TestFlight build is installed, signed in, and notifications are enabled on at least one device.");
-			}
+		const r = await send(step, h, a);
+
+		if (step.kind === "pre" && !r.httpOk) {
+			if (r.error) console.error(`\n✗ Start fan-out errored server-side. Aborting.\n   ${r.error}`);
+			else console.error("\n✗ Start fan-out reached 0 devices (no push-to-start tokens registered). Aborting.\n   → Confirm the TestFlight build is installed, signed in, and notifications are enabled on at least one device.");
 			process.exit(1);
 		}
+		// Updates target the per-Activity tokens in live_activities. 0 here means no device has uploaded
+		// one for this matchId — the push-started Activity needs the app RUNNING to register its token.
+		if (step.kind !== "pre" && step.kind !== "end" && r.tokenCount === 0) {
+			if (UPDATES_ONLY && i === 0) {
+				console.error(`\n✗ No per-Activity token registered for matchId='${MATCH_ID}'. Aborting.\n   → Fire a start with the app OPEN first (e.g. --start-only), confirm a live_activities row, then retry --updates-only.`);
+				process.exit(1);
+			}
+			if (!warnedNoActivity) {
+				warnedNoActivity = true;
+				console.warn(`   ⚠ 0 per-Activity tokens for matchId='${MATCH_ID}' yet — the started Activity hasn't uploaded its token.\n     Keep the app OPEN on the test phone; later steps pick it up once it registers. (Ctrl-C to stop.)`);
+			}
+		}
 	}
-	console.log(`\n✅ Replay complete — FT card will auto-dismiss shortly.\n`);
+	if (START_ONLY) console.log(`\n✅ Start sent. Open the app on the test phone, confirm a live_activities row for '${MATCH_ID}', then run with --updates-only.\n`);
+	else console.log(`\n✅ Replay complete — FT card will auto-dismiss shortly.\n`);
 }
 
 main().catch((e) => {
