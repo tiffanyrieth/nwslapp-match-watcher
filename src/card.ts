@@ -31,7 +31,7 @@ interface CardEnv {
 /** Parsed /card query → render inputs. */
 interface CardOptions {
 	matchId: string;
-	event: string; // kickoff | goal | halftime | fulltime
+	event: string; // kickoff | goal | halftime | fulltime | correction
 	homeAbbr: string;
 	awayAbbr: string;
 	homeScore: number;
@@ -41,6 +41,8 @@ interface CardOptions {
 	homeId?: string; // ESPN team id (for crest fallback)
 	awayId?: string;
 	comp: string; // competition label for the footer (default "NWSL")
+	oldHomeScore?: number; // correction only: the pre-VAR score, struck through next to the corrected one
+	oldAwayScore?: number;
 }
 
 // Team accent colors by abbreviation — mirrored from the app's DesignTeamColors
@@ -75,6 +77,8 @@ function pill(event: string): { label: string; fg: string; bg: string } {
 			return { label: "HT", fg: "#FF9F0A", bg: "rgba(255,159,10,0.18)" };
 		case "fulltime":
 			return { label: "FT", fg: "#30D158", bg: "rgba(48,209,88,0.18)" };
+		case "correction": // VAR reversal — red, unmistakably NOT a goal
+			return { label: "GOAL DISALLOWED", fg: "#FF453A", bg: "rgba(255,69,58,0.20)" };
 		default: // kickoff + goal are both live
 			return { label: "● LIVE", fg: "#FF453A", bg: "rgba(255,69,58,0.18)" };
 	}
@@ -176,6 +180,27 @@ async function renderSvg(env: CardEnv, opts: CardOptions): Promise<string> {
 	]);
 	const p = pill(opts.event);
 	const showMinute = opts.minute != null && (opts.event === "goal" || opts.event === "kickoff");
+	const isCorrection = opts.event === "correction" && opts.oldHomeScore != null && opts.oldAwayScore != null;
+
+	// Score: a correction shows the pre-VAR score struck through next to the corrected one (the strike +
+	// red pill carry the meaning — no arrow glyph, which Inter may not cover). Otherwise the plain score.
+	const scoreRow = isCorrection
+		? el("div", { display: "flex", flexDirection: "row", alignItems: "baseline", gap: 16 }, [
+				el(
+					"div",
+					{ fontSize: 32, fontWeight: 700, color: "rgba(255,255,255,0.38)", textDecoration: "line-through" },
+					`${opts.oldHomeScore} – ${opts.oldAwayScore}`,
+				),
+				el("div", { fontSize: 56, fontWeight: 800, color: "#ffffff" }, `${opts.homeScore} – ${opts.awayScore}`),
+			])
+		: el("div", { fontSize: 56, fontWeight: 800, color: "#ffffff" }, `${opts.homeScore} – ${opts.awayScore}`);
+
+	// Sub-line: minute for goals/kickoff, a "VAR REVIEW" tag for a correction, else an invisible spacer.
+	const subLine = isCorrection
+		? el("div", { fontSize: 15, fontWeight: 700, letterSpacing: 1.2, color: "#FF453A" }, "VAR REVIEW")
+		: showMinute
+			? el("div", { fontSize: 17, fontWeight: 600, color: "#FF9F0A" }, `${opts.minute}'`)
+			: el("div", { fontSize: 17, color: "transparent" }, "·");
 
 	const center = el(
 		"div",
@@ -195,10 +220,8 @@ async function renderSvg(env: CardEnv, opts: CardOptions): Promise<string> {
 				},
 				p.label,
 			),
-			el("div", { fontSize: 56, fontWeight: 800, color: "#ffffff" }, `${opts.homeScore} – ${opts.awayScore}`),
-			showMinute
-				? el("div", { fontSize: 17, fontWeight: 600, color: "#FF9F0A" }, `${opts.minute}'`)
-				: el("div", { fontSize: 17, color: "transparent" }, "·"),
+			scoreRow,
+			subLine,
 		],
 	);
 
@@ -286,6 +309,8 @@ function parseOptions(url: URL): CardOptions {
 		homeId: q.get("hid") ?? undefined,
 		awayId: q.get("aid") ?? undefined,
 		comp: q.get("comp") ?? "NWSL",
+		oldHomeScore: num(q.get("oh")),
+		oldAwayScore: num(q.get("oa")),
 	};
 }
 
