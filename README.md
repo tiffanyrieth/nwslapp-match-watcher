@@ -5,10 +5,19 @@ notifications** (Tier 2 / server push). It is the sibling of
 [`nwslapp-proxy`](../nwslapp-proxy): the proxy is request/response and caches
 ESPN; this Worker is a cron job that watches matches and sends APNs pushes.
 
-**Scope: kickoff · goal · halftime · full-time** — every live event the
-scoreboard's `status` exposes. **Substitutions + lineup-posted are not here:** the
+**Scope: kickoff · goal · halftime · full-time · correction (VAR)** — every live event the
+scoreboard's `status`/score exposes. **Substitutions + lineup-posted are not here:** the
 scoreboard `details` carry goals and cards but no subs, and lineups aren't on the
 scoreboard at all — both need the per-match `/summary` endpoint (a later stage).
+
+**VAR goal correction:** ESPN has no explicit "disallowed" event, so a correction is inferred from a
+score *decrease* during an in-progress match. It is NOT fired immediately — a decrease can be a transient
+ESPN glitch (stale/cached payload, momentary zeros), so the watcher **debounces**: wait ~12s, then re-poll
+a **cache-busted** (fresh) scoreboard; only a persisting decrease fires (a reverted one is discarded,
+logged). Guardrails: in-progress on BOTH snapshots (no resets / new 0-0 loads / in→final). The push is a
+distinct `correction` event ("Goal Disallowed — VAR Review" + corrected score), same `thread-id` as the
+goal, plus a silent Live Activity update rolling the score back. We never detect WHICH goal/why — ESPN
+won't say — only that the score dropped.
 
 ## How it works
 
@@ -51,7 +60,7 @@ would need a Durable Object alarm — a scale-only future optimization.
   service-role read stays server-side. Returns `{ mode, matchId, tokenCount, okCount, results[] }`.
   Use a synthetic `matchId` (e.g. `replay-test`) so test rows never collide with a real
   match (the cron only ever queries matchIds in the live scoreboard). Drives `scripts/replay.mjs`.
-- `GET /card/<matchId>?e&h&a&hs&as&min&sc&hid&aid` — the server-rendered **match-card
+- `GET /card/<matchId>?e&h&a&hs&as&min&sc&hid&aid&oh&oa` — the server-rendered **match-card
   PNG** (both crests + score + status pill) that rich pushes attach. See below.
 
 ## Compressed match replay (`scripts/replay.mjs`)
