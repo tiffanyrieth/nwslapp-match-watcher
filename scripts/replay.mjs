@@ -209,9 +209,9 @@ async function send(step, h, a) {
 	});
 	const out = await res.json().catch(() => ({}));
 	const fails = (out.results ?? []).filter((r) => !r.ok).map((r) => `${r.status}:${r.reason ?? "?"}`);
-	const tag = `${out.okCount ?? 0}/${out.tokenCount ?? 0} ok`;
+	const tag = out.error ? `ERROR: ${out.error}` : `${out.okCount ?? 0}/${out.tokenCount ?? 0} ok`;
 	console.log(`  [${fmtClock(step.offsetSec)}] ${mode.padEnd(6)} ${step.label.padEnd(34)} → HTTP ${res.status} (${tag})${fails.length ? "  fails: " + fails.join(", ") : ""}`);
-	return { httpOk: res.ok, tokenCount: out.tokenCount ?? 0 };
+	return { httpOk: res.ok, tokenCount: out.tokenCount ?? 0, error: out.error };
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -240,8 +240,12 @@ async function main() {
 		const wait = steps[i].offsetSec * 1000 - (Date.now() - t0);
 		if (wait > 0) await sleep(wait);
 		const r = await send(steps[i], h, a);
-		if (i === 0 && (!r.httpOk || r.tokenCount === 0)) {
-			console.error("\n✗ Start fan-out reached 0 devices (no push-to-start tokens registered). Aborting.\n   → Confirm the TestFlight build is installed, signed in, and notifications are enabled on at least one device.");
+		if (i === 0 && !r.httpOk) {
+			if (r.error) {
+				console.error(`\n✗ Start fan-out errored server-side. Aborting.\n   ${r.error}`);
+			} else {
+				console.error("\n✗ Start fan-out reached 0 devices (no push-to-start tokens registered). Aborting.\n   → Confirm the TestFlight build is installed, signed in, and notifications are enabled on at least one device.");
+			}
 			process.exit(1);
 		}
 	}
