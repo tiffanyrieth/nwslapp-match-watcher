@@ -30,6 +30,9 @@
  *   ... --start-hold=30      seconds after start before the first update (token-registration window)
  *   ... --start-only         fire only the start (register the per-Activity token), then stop
  *   ... --updates-only       skip start; drive kickoff→end against an ALREADY-running Activity
+ *   ... --correction         VAR test: fire the last goal as a V1 push, then DISALLOW it — a V1
+ *                            correction push (red card, struck score, stacks via thread-id) + a silent
+ *                            V2 Live Activity score rollback. Mirrors the brief's goal-then-correction.
  *
  * NOTE: a push-started Activity uploads its per-Activity update token to Supabase only while the app is
  * RUNNING to observe it. Keep the test phone's app OPEN around the start, or use --start-only (open app,
@@ -63,7 +66,7 @@ const val = (k, d) => {
 	return a ? a.slice(k.length + 3) : d;
 };
 if (has("--help") || has("-h")) {
-	console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 46).join("\n").replace(/^ \*?/gm, ""));
+	console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 49).join("\n").replace(/^ \*?/gm, ""));
 	process.exit(0);
 }
 const DRY = has("--dry-run");
@@ -80,6 +83,7 @@ const START_HOLD_S = Number(val("start-hold", "30"));
 // --updates-only skips the start and drives kickoff→end against an ALREADY-running Activity.
 const START_ONLY = has("--start-only");
 const UPDATES_ONLY = has("--updates-only");
+const CORRECTION = has("--correction");
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -228,6 +232,87 @@ async function send(step, h, a) {
 	return { httpOk: res.ok, tokenCount: out.tokenCount ?? 0, error: out.error };
 }
 
+// ── VAR correction test (V1 push + V2 LA rollback) ─────────────────────────────
+const cardImageUrl = (params) => `${WATCHER_URL}/card/${MATCH_ID}?${new URLSearchParams(params).toString()}`;
+
+async function pushV1({ label, title, body, event, imageUrl }) {
+	const res = await fetch(`${WATCHER_URL}/test-push`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "x-trigger-secret": SECRET },
+		// no token → the watcher fans out to ALL registered device tokens; same eventID across the goal
+		// and the correction → both carry thread-id match-<MATCH_ID> → they stack on the lock screen.
+		body: JSON.stringify({ eventID: MATCH_ID, event, title, body, imageUrl }),
+	});
+	const out = await res.json().catch(() => ({}));
+	const fails = (out.results ?? []).filter((r) => !r.ok).map((r) => `${r.status}:${r.reason ?? "?"}`);
+	const tag = out.error ? `ERROR: ${out.error}` : `${out.okCount ?? 0}/${out.tokenCount ?? 0} ok`;
+	console.log(`  V1 push  ${label.padEnd(32)} → HTTP ${res.status} (${tag})${fails.length ? "  fails: " + fails.join(", ") : ""}`);
+	return { httpOk: res.ok, tokenCount: out.tokenCount ?? 0, error: out.error };
+}
+
+async function laRollback({ label, hs, as, min }) {
+	const res = await fetch(`${WATCHER_URL}/test-activity`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "x-trigger-secret": SECRET },
+		body: JSON.stringify({ mode: "update", matchId: MATCH_ID, phase: "live", hs, as, min }),
+	});
+	const out = await res.json().catch(() => ({}));
+	const tag = out.error ? `ERROR: ${out.error}` : `${out.okCount ?? 0}/${out.tokenCount ?? 0} ok`;
+	console.log(`  V2 LA    ${label.padEnd(32)} → HTTP ${res.status} (${tag})`);
+}
+
+/**
+ * Replay a VAR goal correction on the real match: re-fire the last real goal as a V1 push, then DISALLOW
+ * it — a V1 correction push (red "GOAL DISALLOWED" card, struck old score, stacks under the goal via
+ * thread-id) + a silent V2 Live Activity score rollback. This exercises the OUTPUT side (copy, card,
+ * stacking, LA backward); the detection→debounce path is proven separately by `node --test`.
+ */
+async function runCorrection(summary) {
+	const { steps, h, a } = buildTimeline(summary);
+	const goals = steps.filter((s) => s.kind === "goal");
+	if (!goals.length) throw new Error("No goal in this match to disallow.");
+	const lastGoal = goals[goals.length - 1];
+	const before = steps[steps.indexOf(lastGoal) - 1] ?? { hs: 0, as: 0 }; // score the goal rolls back to
+	const old = { hs: lastGoal.hs, as: lastGoal.as };
+	const corrected = { hs: before.hs, as: before.as };
+	const scorer = (lastGoal.sc ?? "").replace(/\s+\d+'.*$/, "").trim();
+
+	console.log(`\n▶ Correction plan (${h} home / ${a} away, event ${MATCH_ID}):`);
+	console.log(`  goal      ${h} ${old.hs}–${old.as} ${a}${scorer ? "  · " + scorer : ""}`);
+	console.log(`  disallow  → ${h} ${corrected.hs}–${corrected.as} ${a}  (VAR)`);
+	if (DRY) {
+		console.log("\n(dry run — nothing sent)\n");
+		return;
+	}
+
+	console.log(`\n▶ Firing goal → correction (watch both phones)…\n`);
+	const g = await pushV1({
+		label: `GOAL ${h} ${old.hs}–${old.as} ${a}`,
+		title: `GOAL — ${h} ${old.hs}–${old.as} ${a}`,
+		body: scorer ? `${scorer} scored.` : "Goal.",
+		event: "goal",
+		imageUrl: cardImageUrl({ e: "goal", h, a, hs: old.hs, as: old.as, min: lastGoal.matchMin, sc: scorer }),
+	});
+	if (!g.httpOk) {
+		console.error(g.error ? `\n✗ Goal push errored: ${g.error}` : "\n✗ Goal push reached 0 devices — no registered V1 device tokens. Aborting.");
+		process.exit(1);
+	}
+
+	await sleep(6000);
+	await pushV1({
+		label: `DISALLOWED ${h} ${corrected.hs}–${corrected.as} ${a}`,
+		title: "Goal Disallowed — VAR Review",
+		body: `${h} ${corrected.hs}–${corrected.as} ${a}`,
+		event: "correction",
+		imageUrl: cardImageUrl({ e: "correction", h, a, hs: corrected.hs, as: corrected.as, oh: old.hs, oa: old.as }),
+	});
+
+	await sleep(2000);
+	await laRollback({ label: `roll back to ${corrected.hs}–${corrected.as}`, hs: corrected.hs, as: corrected.as, min: lastGoal.matchMin + 2 });
+
+	console.log(`\n✅ Correction sent. Expect the "Goal Disallowed" card stacked under the goal, and the Live Activity rolled back to ${corrected.hs}–${corrected.as} (if one was active).\n`);
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
 	console.log(`\n🟢 Live Activity replay — ${DRY ? "DRY RUN" : "LIVE"}  (matchId=${MATCH_ID}, ~${TOTAL_MIN} min)\n`);
@@ -237,6 +322,12 @@ async function main() {
 	}
 
 	const { summary, eventId } = await resolveSummary();
+
+	if (CORRECTION) {
+		await runCorrection(summary);
+		return;
+	}
+
 	let { steps, h, a } = buildTimeline(summary);
 	if (START_ONLY) steps = steps.filter((s) => s.kind === "pre");
 	else if (UPDATES_ONLY) steps = steps.filter((s) => s.kind !== "pre");
