@@ -24,7 +24,19 @@
  */
 
 import { apnsJwt, sendApns, type ApnsConfig } from "./apns";
-import { detectEvents, nextState, parseMatch, toPayload, type Match, type ScoreboardEvent, type StoredState } from "./events";
+import {
+	confirmCorrection,
+	correctionEvent,
+	detectCorrectionCandidate,
+	detectEvents,
+	nextState,
+	parseMatch,
+	toPayload,
+	type Match,
+	type MatchEvent,
+	type ScoreboardEvent,
+	type StoredState,
+} from "./events";
 import { handleCard } from "./card";
 import { activityTokensForMatch, allStartTokens, startTokensForTeams, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { endLiveActivity, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
@@ -62,6 +74,13 @@ export interface Env {
 // ignored by the binding — only the path matters). Shared edge cache, transparent ESPN bytes.
 const PROXY_SCOREBOARD = "https://proxy/scoreboard";
 const MATCH_STATE_TTL = 21600; // 6h — auto-expires a match's KV entry after it ends.
+
+// VAR correction debounce: a score decrease isn't fired immediately. We wait, then re-poll a FRESH
+// scoreboard; only a persisting decrease fires (a reverted score was a transient ESPN glitch). 12s sits
+// in the brief's ~10–15s window and well under the 60s cron, so a debouncing run never overlaps the next.
+const CORRECTION_DEBOUNCE_MS = 12_000;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // V2 Live Activity timing.
 const LA_START_LEAD_MS = 5 * 60 * 1000; // remote-start the Activity ≤5 min before kickoff
@@ -130,6 +149,29 @@ function kickoffMs(event: ScoreboardEvent): number | null {
 	return Number.isFinite(ms) ? ms : null;
 }
 
+/**
+ * Re-read ONE match from a FRESH scoreboard (the debounce re-poll). The `_cb` param changes the proxy
+ * cache key → guaranteed cache MISS → the proxy fetches ESPN fresh. Without this the re-poll would hit
+ * the proxy's ~30s live cache and just re-read the same (possibly glitched) payload — making the
+ * debounce a no-op. Returns null on fetch failure or if the event is no longer present.
+ */
+async function refetchMatch(env: Env, year: number, eventId: string): Promise<Match | null> {
+	try {
+		const url = `${PROXY_SCOREBOARD}?dates=${year}0101-${year}1231&limit=500&_cb=${Date.now()}`;
+		const res = await env.PROXY.fetch(url, { headers: { Accept: "application/json" } });
+		if (!res.ok) {
+			console.log(`[watcher] correction re-poll failed: ${res.status}`);
+			return null;
+		}
+		const evs = ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
+		const found = evs.find((e) => e.id === eventId);
+		return found ? parseMatch(found) : null;
+	} catch (err) {
+		console.log(`[watcher] correction re-poll threw: ${err}`);
+		return null;
+	}
+}
+
 /** One poll: scoreboard → per-match diff → event pushes. */
 async function runWatch(env: Env): Promise<void> {
 	const year = new Date().getUTCFullYear();
@@ -170,37 +212,61 @@ async function runWatch(env: Env): Promise<void> {
 
 		const detected = detectEvents(prev, match);
 
-		for (const ev of detected) {
+		// One V1 fan-out (follower lookup → APNs) — shared by normal events and the VAR correction.
+		const fireV1 = async (ev: MatchEvent): Promise<void> => {
 			let tokens: string[];
 			try {
 				tokens = await tokensForEvent(sb, ev.teamIds, ev.prefColumn);
 			} catch (err) {
 				console.log(`[watcher] follower lookup failed (${ev.type} ${ev.eventId}): ${err}`);
-				continue;
+				return;
 			}
-			if (tokens.length === 0) continue;
+			if (tokens.length === 0) return;
 
 			jwt ??= await apnsJwt(apns);
 			const payload = toPayload(ev, env.WATCHER_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
-			const sent = results.filter((r) => r.ok).length;
-			console.log(`[watcher] ${ev.type} "${ev.title}": ${sent}/${tokens.length} pushed`);
+			console.log(`[watcher] ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
+		};
+
+		for (const ev of detected) await fireV1(ev);
+
+		// VAR correction: a score decrease during an in-progress match. NOT fired immediately — first
+		// debounce against a transient ESPN glitch (stale/cached payload, momentary zeros) by waiting,
+		// then re-polling a FRESH scoreboard. Only a persisting decrease fires (brief items 2–3).
+		let effectiveMatch = match; // the snapshot we persist + sync the Live Activity from
+		let correctionFired = false;
+		const candidate = detectCorrectionCandidate(prev, match);
+		if (candidate) {
+			console.log(
+				`[watcher] correction candidate ${match.eventId}: ${candidate.prev.home}-${candidate.prev.away} → ${match.home.score}-${match.away.score}; debouncing ${CORRECTION_DEBOUNCE_MS}ms`,
+			);
+			await sleep(CORRECTION_DEBOUNCE_MS);
+			const recheck = await refetchMatch(env, year, match.eventId);
+			if (recheck) effectiveMatch = recheck; // freshest truth → baseline + LA from it, fired or not
+			if (confirmCorrection(candidate, recheck)) {
+				await fireV1(correctionEvent(candidate.prev, recheck!));
+				correctionFired = true;
+				console.log(`[watcher] correction ${match.eventId} CONFIRMED → ${recheck!.home.score}-${recheck!.away.score}`);
+			} else {
+				console.log(`[watcher] correction ${match.eventId} discarded — decrease did not persist (glitch)`);
+			}
 		}
 
 		// Persist the new state while live; clean up once the match has ended (so a
 		// later "post" tick is skipped by the no-prev guard above — no duplicate FT).
 		// V2 Live Activity (ADDITIVE — the V1 push path above is untouched). Pushes the current
-		// state to this match's running Activities on an event / full-time / periodic resync.
+		// state to this match's running Activities on an event / correction / full-time / periodic resync.
 		try {
-			await syncLiveActivity(env, sb, apns, match, detected.length > 0);
+			await syncLiveActivity(env, sb, apns, effectiveMatch, detected.length > 0 || correctionFired);
 		} catch (err) {
 			console.log(`[watcher] LA sync failed (${match.eventId}): ${err}`);
 		}
 
-		if (match.state === "post") {
+		if (effectiveMatch.state === "post") {
 			await env.MATCH_STATE.delete(key);
 		} else {
-			await env.MATCH_STATE.put(key, JSON.stringify(nextState(prev, match, detected)), {
+			await env.MATCH_STATE.put(key, JSON.stringify(nextState(prev, effectiveMatch, detected)), {
 				expirationTtl: MATCH_STATE_TTL,
 			});
 		}

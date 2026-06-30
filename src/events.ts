@@ -87,7 +87,7 @@ export interface StoredState {
 	halftimeSent: boolean;
 }
 
-export type MatchEventType = "kickoff" | "goal" | "halftime" | "fulltime";
+export type MatchEventType = "kickoff" | "goal" | "halftime" | "fulltime" | "correction";
 
 /** A detected event, carrying everything to find followers + compose the push. */
 export interface MatchEvent {
@@ -110,6 +110,10 @@ export interface MatchEvent {
 	minute?: number;
 	/** Short scorer name for the card footer/body (goals only), best-effort. */
 	scorer?: string;
+	/** Pre-correction score — set ONLY for "correction" events, to render the struck-through old score.
+	 *  (We never know WHICH goal/scorer was reversed — ESPN doesn't say — only that the score dropped.) */
+	prevHomeScore?: number;
+	prevAwayScore?: number;
 }
 
 function toScore(raw?: string): number {
@@ -284,6 +288,60 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 	return events;
 }
 
+/**
+ * VAR correction detection. Split from detectEvents because a correction is NOT fired immediately: a
+ * score decrease can be a transient ESPN glitch (stale/cached payload, momentary zeros), so the caller
+ * must DEBOUNCE — re-poll a FRESH scoreboard and confirm the decrease persisted — before firing.
+ * detectCorrectionCandidate is the pure guardrail; confirmCorrection is the pure post-debounce decision;
+ * correctionEvent builds the push. All pure (no I/O) so the debounce logic is unit-testable.
+ */
+export interface CorrectionCandidate {
+	eventId: string;
+	/** The pre-correction (higher) baseline — for the struck old score + the confirm comparison. */
+	prev: { home: number; away: number };
+}
+
+/**
+ * A VAR-correction CANDIDATE: a side's score decreased while the match is in-progress on BOTH the prior
+ * and current snapshots (brief guardrail #3 — blocks new-match 0-0 loads, resets, and in→final
+ * transitions). Null otherwise. The decision to fire is deferred to confirmCorrection after a debounce.
+ */
+export function detectCorrectionCandidate(prev: StoredState | null, match: Match): CorrectionCandidate | null {
+	if (!prev || prev.state !== "in" || match.state !== "in") return null;
+	const decreased = match.home.score < prev.home.score || match.away.score < prev.away.score;
+	if (!decreased) return null;
+	return { eventId: match.eventId, prev: { home: prev.home.score, away: prev.away.score } };
+}
+
+/**
+ * Confirm a candidate against a FRESH re-read (the debounce result). Real only if the match is still
+ * in-progress AND the score is still below the prior baseline (the decrease persisted). A reverted score
+ * (back to/above baseline), a vanished match, or a now-final re-read → false (glitch, or a status
+ * transition we must not fire across).
+ */
+export function confirmCorrection(candidate: CorrectionCandidate, recheck: Match | null): boolean {
+	if (!recheck || recheck.state !== "in") return false;
+	return recheck.home.score < candidate.prev.home || recheck.away.score < candidate.prev.away;
+}
+
+/** Build the "Goal Disallowed — VAR Review" event from the confirmed (corrected) match reading. */
+export function correctionEvent(prev: { home: number; away: number }, match: Match): MatchEvent {
+	return {
+		type: "correction",
+		eventId: match.eventId,
+		teamIds: [match.home.id, match.away.id],
+		prefColumn: "goals", // whoever opted into goal alerts wants to know one was reversed
+		title: "Goal Disallowed — VAR Review",
+		body: scoreline(match), // corrected score (e.g. "WAS 1–1 SEA"); the title carries the reversal
+		homeAbbr: match.home.abbr,
+		awayAbbr: match.away.abbr,
+		homeScore: match.home.score,
+		awayScore: match.away.score,
+		prevHomeScore: prev.home,
+		prevAwayScore: prev.away,
+	};
+}
+
 /** The server-rendered match-card URL for an event (crests + score + status pill). */
 export function cardUrl(base: string, event: MatchEvent): string {
 	const params = new URLSearchParams({
@@ -295,6 +353,9 @@ export function cardUrl(base: string, event: MatchEvent): string {
 	});
 	if (event.minute != null) params.set("min", String(event.minute));
 	if (event.scorer) params.set("sc", event.scorer);
+	// Correction only: the prior score, so the card can strike it through next to the corrected one.
+	if (event.prevHomeScore != null) params.set("oh", String(event.prevHomeScore));
+	if (event.prevAwayScore != null) params.set("oa", String(event.prevAwayScore));
 	// ESPN team ids enable the card's middle crest fallback (proxy → ESPN CDN → ring).
 	if (event.teamIds[0]) params.set("hid", event.teamIds[0]);
 	if (event.teamIds[1]) params.set("aid", event.teamIds[1]);
