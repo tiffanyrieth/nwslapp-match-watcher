@@ -26,7 +26,7 @@
 import { apnsJwt, sendApns, type ApnsConfig } from "./apns";
 import { detectEvents, nextState, parseMatch, toPayload, type Match, type ScoreboardEvent, type StoredState } from "./events";
 import { handleCard } from "./card";
-import { activityTokensForMatch, startTokensForTeams, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activityTokensForMatch, allStartTokens, startTokensForTeams, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { endLiveActivity, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
 
@@ -363,12 +363,19 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 
 /**
  * Manual trigger for V2 Live Activities — the on-device verification path (mirrors /test-push).
- * Body: { mode: "start"|"update"|"end", token, matchId?, h?, a?, hs?, as?, phase?, min?, sc?, comp? }.
- *   - mode "start": `token` is the device's push-to-start token (from live_activity_start_tokens);
- *     creates the Activity with the given attributes + initial state.
- *   - mode "update"/"end": `token` is the per-Activity token (from live_activities, written by the app
- *     once the Activity is running); pushes a new content-state / ends it.
+ * Body: { mode: "start"|"update"|"end", token?, matchId?, h?, a?, hs?, as?, phase?, min?, sc?, comp? }.
+ *   - mode "start": creates the Activity with the given attributes + initial state.
+ *   - mode "update"/"end": pushes a new content-state / ends it.
+ * Token targeting:
+ *   - `token` PRESENT  → push to that one device (single-device test; back-compat). For "start" it's the
+ *     device's push-to-start token; for "update"/"end" it's the per-Activity token.
+ *   - `token` OMITTED  → FAN OUT to all registered devices (the replay tool): "start" → every
+ *     push-to-start token (allStartTokens); "update"/"end" → every per-Activity token for `matchId`
+ *     (activityTokensForMatch). The service-role read stays in the Worker, so the caller needs only the
+ *     trigger secret. Use a synthetic `matchId` (e.g. "replay-test") so test rows never collide with a
+ *     real match (the cron only ever queries matchIds in the live scoreboard).
  * Fire a sequence (start → update goal → update HT → … → end) to walk the full lifecycle on device.
+ * Returns { mode, matchId, tokenCount, okCount, results[] } — every per-token APNs result (no silent fail).
  */
 async function handleTestActivity(request: Request, env: Env): Promise<Response> {
 	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
@@ -392,8 +399,6 @@ async function handleTestActivity(request: Request, env: Env): Promise<Response>
 	} catch {
 		return new Response("Bad JSON.", { status: 400 });
 	}
-	if (!p.token) return new Response("Missing 'token'.", { status: 400 });
-
 	const apns = apnsConfig(env);
 	const jwt = await apnsJwt(apns);
 	const nowSec = Math.floor(Date.now() / 1000);
@@ -411,17 +416,40 @@ async function handleTestActivity(request: Request, env: Env): Promise<Response>
 	};
 
 	const mode = p.mode ?? "start";
-	let result;
-	if (mode === "start") {
-		const attrs = attributesFor(p.matchId ?? "test-match", p.h ?? "ORL", p.a ?? "POR", p.comp ?? "NWSL");
-		result = await startLiveActivity(p.token, attrs, state, jwt, apns);
-	} else if (mode === "end") {
-		result = await endLiveActivity(p.token, state, jwt, apns, nowSec + LA_DISMISS_AFTER_S);
-	} else {
-		result = await updateLiveActivity(p.token, state, jwt, apns);
+	const matchId = p.matchId ?? "test-match";
+
+	// Resolve the target tokens. Explicit `token` → that one device (single-device test, back-compat).
+	// Omitted → fan out to ALL registered devices: start → every push-to-start token; update/end →
+	// every per-Activity token for this matchId. The service-role read stays server-side.
+	const sb = supabaseConfig(env);
+	const tokens = p.token
+		? [p.token]
+		: mode === "start"
+			? await allStartTokens(sb)
+			: await activityTokensForMatch(sb, matchId);
+	if (tokens.length === 0) {
+		return new Response(
+			JSON.stringify(
+				{ mode, matchId, tokenCount: 0, okCount: 0, results: [], note: "No registered tokens for this fan-out." },
+				null,
+				2,
+			),
+			{ status: 502, headers: { "Content-Type": "application/json" } },
+		);
 	}
-	return new Response(JSON.stringify({ mode, ...result }, null, 2), {
-		status: result.ok ? 200 : 502,
+
+	const send = (token: string) => {
+		if (mode === "start") {
+			const attrs = attributesFor(matchId, p.h ?? "ORL", p.a ?? "POR", p.comp ?? "NWSL");
+			return startLiveActivity(token, attrs, state, jwt, apns);
+		}
+		if (mode === "end") return endLiveActivity(token, state, jwt, apns, nowSec + LA_DISMISS_AFTER_S);
+		return updateLiveActivity(token, state, jwt, apns);
+	};
+	const results = await Promise.all(tokens.map(send));
+	const okCount = results.filter((r) => r.ok).length;
+	return new Response(JSON.stringify({ mode, matchId, tokenCount: tokens.length, okCount, results }, null, 2), {
+		status: okCount > 0 ? 200 : 502,
 		headers: { "Content-Type": "application/json" },
 	});
 }

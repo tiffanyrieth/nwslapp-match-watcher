@@ -41,8 +41,33 @@ would need a Durable Object alarm — a scale-only future optimization.
   Body: `{ "token", "title?", "subtitle?", "body?", "eventID?", "event?", "imageUrl?" }`.
   When `imageUrl` is omitted it defaults to this worker's own `/card` render, so the
   simplest call still produces the full rich (image-attached) notification.
+- `POST /test-activity` — manual **V2 Live Activity** trigger (the on-device verification
+  path). Guarded by `x-trigger-secret`. Body:
+  `{ "mode": "start"|"update"|"end", "token?", "matchId?", "h?", "a?", "hs?", "as?", "phase?", "min?", "sc?", "comp?" }`.
+  **Token targeting:** with `token` it pushes to that one device (push-to-start token for
+  `start`, per-Activity token for `update`/`end`). **Omit `token` to fan out to ALL
+  registered devices** — `start` → every push-to-start token (`allStartTokens`),
+  `update`/`end` → every per-Activity token for `matchId` (`activityTokensForMatch`). The
+  service-role read stays server-side. Returns `{ mode, matchId, tokenCount, okCount, results[] }`.
+  Use a synthetic `matchId` (e.g. `replay-test`) so test rows never collide with a real
+  match (the cron only ever queries matchIds in the live scoreboard). Drives `scripts/replay.mjs`.
 - `GET /card/<matchId>?e&h&a&hs&as&min&sc&hid&aid` — the server-rendered **match-card
   PNG** (both crests + score + status pill) that rich pushes attach. See below.
+
+## Compressed match replay (`scripts/replay.mjs`)
+
+A zero-dep Node tool that replays a **real past match** — real goals/minutes/scorers, pulled
+from the proxy's `/summary` `keyEvents` — compressed from ~90′ into ~10 min, walking the full
+Live Activity lifecycle on **every** registered device (pre → kickoff → goals → HT → 2nd half →
+FT → auto-dismiss) via the `/test-activity` fan-out above. Each scoring play is credited to the
+team ESPN attributes it to (own goals included), and the computed final is asserted against
+ESPN's. The widget shows each event's real match minute and jumps forward at each push.
+
+```sh
+node scripts/replay.mjs --dry-run                       # print timeline + schedule, send nothing
+MANUAL_TRIGGER_SECRET=<secret> node scripts/replay.mjs  # live: the team's latest finished match
+# flags: --event=<id> --fixture --minutes=10 --team=WAS --match-id=replay-test
+```
 
 ## Rich notifications (match card + NSE)
 
