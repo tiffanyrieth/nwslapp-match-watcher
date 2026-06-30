@@ -93,6 +93,14 @@ export async function activityTokensForMatch(cfg: SupabaseConfig, matchId: strin
 	return uniq(rows.map((r) => r.push_token));
 }
 
+/** EVERY registered push-to-start token, unfiltered by team. Used ONLY by the manual replay/test path:
+ *  a synthetic match has no team_alert_preferences rows, so the per-team gate `startTokensForTeams`
+ *  uses can't apply — the test tool deliberately fans out to all devices. Not used by the cron. */
+export async function allStartTokens(cfg: SupabaseConfig): Promise<string[]> {
+	const rows = await rest<{ token: string }>(cfg, `live_activity_start_tokens?select=token`);
+	return uniq(rows.map((r) => r.token));
+}
+
 /** Push-to-START tokens to remote-create a Live Activity: users with match alerts ON for EITHER team
  *  who have registered an ActivityKit push-to-start token (live_activity_start_tokens). */
 export async function startTokensForTeams(cfg: SupabaseConfig, teamIds: string[]): Promise<string[]> {
