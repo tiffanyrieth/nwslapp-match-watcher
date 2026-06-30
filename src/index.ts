@@ -420,13 +420,22 @@ async function handleTestActivity(request: Request, env: Env): Promise<Response>
 
 	// Resolve the target tokens. Explicit `token` → that one device (single-device test, back-compat).
 	// Omitted → fan out to ALL registered devices: start → every push-to-start token; update/end →
-	// every per-Activity token for this matchId. The service-role read stays server-side.
+	// every per-Activity token for this matchId. The service-role read stays server-side. A Supabase
+	// error here must fail LOUD with the reason (the bare-500 it'd otherwise be is a silent failure).
 	const sb = supabaseConfig(env);
-	const tokens = p.token
-		? [p.token]
-		: mode === "start"
-			? await allStartTokens(sb)
-			: await activityTokensForMatch(sb, matchId);
+	let tokens: string[];
+	try {
+		tokens = p.token
+			? [p.token]
+			: mode === "start"
+				? await allStartTokens(sb)
+				: await activityTokensForMatch(sb, matchId);
+	} catch (err) {
+		return new Response(
+			JSON.stringify({ mode, matchId, error: `token resolution failed: ${String(err)}` }, null, 2),
+			{ status: 502, headers: { "Content-Type": "application/json" } },
+		);
+	}
 	if (tokens.length === 0) {
 		return new Response(
 			JSON.stringify(
