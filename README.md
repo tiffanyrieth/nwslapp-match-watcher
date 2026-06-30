@@ -67,7 +67,14 @@ ESPN's. The widget shows each event's real match minute and jumps forward at eac
 node scripts/replay.mjs --dry-run                       # print timeline + schedule, send nothing
 MANUAL_TRIGGER_SECRET=<secret> node scripts/replay.mjs  # live: the team's latest finished match
 # flags: --event=<id> --fixture --minutes=10 --team=WAS --match-id=replay-test
+#        --start-hold=30 --start-only --updates-only
 ```
+
+**Per-Activity token timing (gotcha):** push-to-start creates the lock-screen Activity even with the
+app closed, but the app uploads that Activity's *per-Activity update token* to `live_activities` only
+while it is RUNNING to observe it. So `update`/`end` fan-out finds 0 tokens unless the test phone's app
+was open around the start. Keep it foregrounded, or do it in two phases: `--start-only` (then open the
+app, confirm a `live_activities` row), then `--updates-only` to drive kickoff→end.
 
 ## Rich notifications (match card + NSE)
 
