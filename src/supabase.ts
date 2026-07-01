@@ -109,8 +109,8 @@ export async function allStartTokens(cfg: SupabaseConfig): Promise<string[]> {
 }
 
 /** Push-to-START tokens to remote-create a Live Activity: users with match alerts ON for EITHER team
- *  who have NOT opted out of Live Activities (notification_preferences.live_activities_enabled) and who
- *  have registered an ActivityKit push-to-start token (live_activity_start_tokens). */
+ *  who have explicitly opted IN to Live Activities (notification_preferences.live_activities_enabled = true)
+ *  and who have registered an ActivityKit push-to-start token (live_activity_start_tokens). */
 export async function startTokensForTeams(cfg: SupabaseConfig, teamIds: string[]): Promise<string[]> {
 	if (teamIds.length === 0) return [];
 	const alertRows = await rest<{ user_id: string }>(
@@ -119,16 +119,15 @@ export async function startTokensForTeams(cfg: SupabaseConfig, teamIds: string[]
 	);
 	const ids = uniq(alertRows.map((r) => r.user_id));
 	if (ids.length === 0) return [];
-	// Drop anyone who EXPLICITLY turned the V2 Live Activity OFF. It's an opt-out (default true), so we
-	// exclude only users with a row set false — a user with no notification_preferences row yet still
-	// counts as enabled (querying `=eq.true` would wrongly drop them). Server-side gate: the app keeps its
-	// push-to-start token registered, so re-enabling is instant.
-	const optedOutRows = await rest<{ user_id: string }>(
+	// Keep only users who EXPLICITLY opted IN to the V2 Live Activity. It's a Tier-2 opt-in (default off),
+	// so require an explicit `live_activities_enabled = true` — a user with no row counts as OFF (same
+	// pattern as tokensForEvent's per-event gate). Server-side gate: the app keeps its push-to-start token
+	// registered regardless, so re-enabling is instant.
+	const prefRows = await rest<{ user_id: string }>(
 		cfg,
-		`notification_preferences?user_id=in.${inList(ids)}&live_activities_enabled=eq.false&select=user_id`,
+		`notification_preferences?user_id=in.${inList(ids)}&live_activities_enabled=eq.true&select=user_id`,
 	);
-	const optedOut = new Set(optedOutRows.map((r) => r.user_id));
-	const enabledIds = ids.filter((id) => !optedOut.has(id));
+	const enabledIds = uniq(prefRows.map((r) => r.user_id));
 	if (enabledIds.length === 0) return [];
 	const rows = await rest<{ token: string }>(
 		cfg,
