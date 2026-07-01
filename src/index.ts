@@ -83,7 +83,9 @@ const CORRECTION_DEBOUNCE_MS = 12_000;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // V2 Live Activity timing.
-const LA_START_LEAD_MS = 5 * 60 * 1000; // remote-start the Activity ≤5 min before kickoff
+const LA_START_LEAD_MS = 20 * 60 * 1000; // remote-start the Activity ≤20 min before kickoff — the token
+// registration window (a device can take minutes to observe the Activity + upload its per-Activity token;
+// ≤5 min bled past kickoff and missed early goals). Doubles as the pre-match "SOON" glance card.
 const LA_RESYNC_MS = 10 * 60 * 1000; // clock-drift resync cadence (the widget's local timer ticks between)
 const LA_DISMISS_AFTER_S = 15 * 60; // keep the FT card on the lock screen ~15 min, then dismiss
 
@@ -292,23 +294,45 @@ async function syncLiveActivity(
 ): Promise<void> {
 	const ended = match.state === "post";
 	const rsKey = `la-rs:${match.eventId}`;
-	if (!ended && !hadEvent) {
-		const last = await env.MATCH_STATE.get(rsKey);
-		if (last && Date.now() - Number(last) < LA_RESYNC_MS) return; // the widget's local timer covers it
-	}
+	const seenKey = `la-seen:${match.eventId}`;
+
 	const tokens = await activityTokensForMatch(sb, match.eventId);
 	if (tokens.length === 0) return;
 	const jwt = await apnsJwt(apns);
 	const state: LiveContentState = contentStateFromMatch(match);
+
 	if (ended) {
 		const dismissAt = Math.floor(Date.now() / 1000) + LA_DISMISS_AFTER_S;
 		await Promise.all(tokens.map((t) => endLiveActivity(t, state, jwt, apns, dismissAt)));
 		await env.MATCH_STATE.delete(rsKey);
+		await env.MATCH_STATE.delete(seenKey);
 		console.log(`[watcher] LA end ${match.eventId}: ${tokens.length} activities`);
-	} else {
-		await Promise.all(tokens.map((t) => updateLiveActivity(t, state, jwt, apns)));
-		await env.MATCH_STATE.put(rsKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
+		return;
 	}
+
+	// Per-Activity tokens seen for the FIRST time — a phone that registered its token late (iOS can take
+	// minutes to wake the app after push-to-start). Those MUST get the current state now, even on a quiet
+	// throttled poll, or they sit on the stale pre-match card until the next event (the "brother missed
+	// the early updates" gap).
+	const seenJson = await env.MATCH_STATE.get(seenKey);
+	const seen = new Set<string>(seenJson ? (JSON.parse(seenJson) as string[]) : []);
+	const fresh = tokens.filter((t) => !seen.has(t));
+
+	// Full resync on an event or once the drift cadence elapses; between those the widget's local clock ticks.
+	let resyncAll = hadEvent;
+	if (!resyncAll) {
+		const last = await env.MATCH_STATE.get(rsKey);
+		resyncAll = !last || Date.now() - Number(last) >= LA_RESYNC_MS;
+	}
+
+	// Push to the full set (resync) OR — on a quiet poll — just the freshly-registered tokens (catch-up).
+	const targets = resyncAll ? tokens : fresh;
+	if (targets.length > 0) {
+		await Promise.all(targets.map((t) => updateLiveActivity(t, state, jwt, apns)));
+		if (resyncAll) await env.MATCH_STATE.put(rsKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
+		if (fresh.length > 0) console.log(`[watcher] LA catch-up ${match.eventId}: ${fresh.length} new`);
+	}
+	if (fresh.length > 0) await env.MATCH_STATE.put(seenKey, JSON.stringify(tokens), { expirationTtl: MATCH_STATE_TTL });
 }
 
 /** SEPARATE start trigger (NOT detectEvents): for matches ≤5 min pre-kickoff, remote-start a Live
