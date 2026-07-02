@@ -38,7 +38,7 @@ import {
 	type StoredState,
 } from "./events";
 import { handleCard } from "./card";
-import { activityTokensForMatch, allDeviceTokens, allStartTokens, startTokensForTeams, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activityTokensForMatch, allDeviceTokens, allStartTokens, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { endLiveActivity, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
 
@@ -73,6 +73,25 @@ export interface Env {
 // The sibling proxy's scoreboard route, reached via the PROXY service binding (host is
 // ignored by the binding — only the path matters). Shared edge cache, transparent ESPN bytes.
 const PROXY_SCOREBOARD = "https://proxy/scoreboard";
+
+// The women's national-team ESPN scoreboard slugs — the SAME set the app polls for the schedule
+// (NationalTeamFeed.all in the app's Models/Competition.swift). Reached through the proxy's
+// `/scoreboard?league=<slug>` (all allowlisted there), so no new route/auth. Most are seasonal
+// (empty off-tournament) → the live-window gate means they create KV state only during real matches.
+const NT_LEAGUES = [
+	"fifa.friendly.w",
+	"fifa.shebelieves",
+	"concacaf.w.gold",
+	"concacaf.womens.championship",
+	"uefa.weuro",
+	"fifa.wwc",
+	"fifa.w.olympics",
+] as const;
+
+// A national-team match event → the two `competition_alert_preferences` follow keys to fan out to
+// ("nt:USA", "nt:CAN"). The FIFA code is ESPN's competitor abbreviation, already on every MatchEvent.
+const ntKeys = (ev: MatchEvent): string[] =>
+	[ev.homeAbbr, ev.awayAbbr].filter((a) => a).map((a) => `nt:${a}`);
 const MATCH_STATE_TTL = 21600; // 6h — auto-expires a match's KV entry after it ends.
 
 // VAR correction debounce: a score decrease isn't fired immediately. We wait, then re-poll a FRESH
@@ -271,6 +290,52 @@ async function runWatch(env: Env): Promise<void> {
 			await env.MATCH_STATE.put(key, JSON.stringify(nextState(prev, effectiveMatch, detected)), {
 				expirationTtl: MATCH_STATE_TTL,
 			});
+		}
+	}
+
+	// NATIONAL-TEAM pass: the same event detection (kickoff/goal/HT/FT), but fanned out by FIFA code to
+	// `competition_alert_preferences` instead of the club table. V1 push only — NT Live Activities (V2)
+	// and the VAR-correction debounce are deferred (kept the club-only path). Feeds share the proxy edge
+	// cache; the live-window gate means an off-tournament feed does zero KV work. Reuses `jwt`/`sb`/`apns`.
+	for (const slug of NT_LEAGUES) {
+		let ntEvents: ScoreboardEvent[];
+		try {
+			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?league=${slug}&dates=${year}0101-${year}1231&limit=500`, {
+				headers: { Accept: "application/json" },
+			});
+			if (!res.ok) continue;
+			ntEvents = ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
+		} catch (err) {
+			console.log(`[watcher] NT scoreboard ${slug} failed: ${err}`);
+			continue;
+		}
+		for (const event of ntEvents) {
+			const ko = kickoffMs(event);
+			if (ko === null || now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) continue;
+			const match = parseMatch(event);
+			if (!match) continue;
+			const key = `match:${match.eventId}`;
+			const prev = await env.MATCH_STATE.get<StoredState>(key, "json");
+			if (match.state === "post" && !prev) continue;
+
+			const detected = detectEvents(prev, match);
+			for (const ev of detected) {
+				let tokens: string[];
+				try {
+					tokens = await tokensForCompetitionEvent(sb, ntKeys(ev), ev.prefColumn);
+				} catch (err) {
+					console.log(`[watcher] NT follower lookup failed (${ev.type} ${ev.eventId}): ${err}`);
+					continue;
+				}
+				if (tokens.length === 0) continue;
+				jwt ??= await apnsJwt(apns);
+				const payload = toPayload(ev, env.WATCHER_PUBLIC_URL);
+				const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
+				console.log(`[watcher] NT ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
+			}
+
+			if (match.state === "post") await env.MATCH_STATE.delete(key);
+			else await env.MATCH_STATE.put(key, JSON.stringify(nextState(prev, match, detected)), { expirationTtl: MATCH_STATE_TTL });
 		}
 	}
 

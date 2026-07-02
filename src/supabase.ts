@@ -28,6 +28,9 @@ async function rest<T>(cfg: SupabaseConfig, pathAndQuery: string): Promise<T[]> 
 
 const uniq = (xs: string[]): string[] => [...new Set(xs)];
 const inList = (xs: string[]): string => `(${xs.join(",")})`;
+// Quoted variant for string keys that may contain PostgREST-special chars (the national-team
+// follow keys are "nt:USA" — the colon is safe quoted). Our own values, so no escaping needed.
+const inListQuoted = (xs: string[]): string => `(${xs.map((x) => `"${x}"`).join(",")})`;
 
 /** The `notification_preferences` columns the watcher can gate on. */
 export type PrefColumn = "kickoff" | "goals" | "halftime" | "full_time";
@@ -62,7 +65,30 @@ export async function tokensForEvent(
 		cfg,
 		`team_alert_preferences?team_id=in.${inList(teamIds)}&alerts_enabled=eq.true&select=user_id`,
 	);
-	const optedInIds = uniq(alertRows.map((r) => r.user_id));
+	return tokensForUsers(cfg, uniq(alertRows.map((r) => r.user_id)), prefColumn);
+}
+
+/** The NATIONAL-TEAM twin of tokensForEvent: same two gates, but the per-team opt-in comes from
+ *  `competition_alert_preferences` (keyed by follow_key "nt:USA"), which the app writes when a user
+ *  turns on a national team's bell. The watcher passes the match's two FIFA codes as follow keys. */
+export async function tokensForCompetitionEvent(
+	cfg: SupabaseConfig,
+	followKeys: string[],
+	prefColumn: PrefColumn,
+): Promise<string[]> {
+	if (followKeys.length === 0) return [];
+	if (!PREF_COLUMNS.includes(prefColumn)) throw new Error(`Unknown pref column: ${prefColumn}`);
+
+	const alertRows = await rest<{ user_id: string }>(
+		cfg,
+		`competition_alert_preferences?follow_key=in.${inListQuoted(followKeys)}&alerts_enabled=eq.true&select=user_id`,
+	);
+	return tokensForUsers(cfg, uniq(alertRows.map((r) => r.user_id)), prefColumn);
+}
+
+/** Shared tail of the fan-out: given the per-team opted-in user ids, gate by the per-event pref
+ *  column (the global type toggle) and resolve device tokens. */
+async function tokensForUsers(cfg: SupabaseConfig, optedInIds: string[], prefColumn: PrefColumn): Promise<string[]> {
 	if (optedInIds.length === 0) return [];
 
 	const prefs = await rest<{ user_id: string }>(
