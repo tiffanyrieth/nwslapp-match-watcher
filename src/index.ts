@@ -38,7 +38,7 @@ import {
 	type StoredState,
 } from "./events";
 import { handleCard } from "./card";
-import { activityTokensForMatch, allDeviceTokens, allStartTokens, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activityTokensForMatch, allDeviceTokens, allStartTokens, pruneDeadTokens, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { endLiveActivity, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
 
@@ -248,6 +248,7 @@ async function runWatch(env: Env): Promise<void> {
 			const payload = toPayload(ev, env.WATCHER_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 			console.log(`[watcher] ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
+			await pruneDeadTokens(sb, "device_tokens", "token", results);
 		};
 
 		for (const ev of detected) await fireV1(ev);
@@ -332,6 +333,7 @@ async function runWatch(env: Env): Promise<void> {
 				const payload = toPayload(ev, env.WATCHER_PUBLIC_URL);
 				const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 				console.log(`[watcher] NT ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
+				await pruneDeadTokens(sb, "device_tokens", "token", results);
 			}
 
 			if (match.state === "post") await env.MATCH_STATE.delete(key);
@@ -368,7 +370,8 @@ async function syncLiveActivity(
 
 	if (ended) {
 		const dismissAt = Math.floor(Date.now() / 1000) + LA_DISMISS_AFTER_S;
-		await Promise.all(tokens.map((t) => endLiveActivity(t, state, jwt, apns, dismissAt)));
+		const endResults = await Promise.all(tokens.map((t) => endLiveActivity(t, state, jwt, apns, dismissAt)));
+		await pruneDeadTokens(sb, "live_activities", "push_token", endResults);
 		await env.MATCH_STATE.delete(rsKey);
 		await env.MATCH_STATE.delete(seenKey);
 		console.log(`[watcher] LA end ${match.eventId}: ${tokens.length} activities`);
@@ -393,7 +396,8 @@ async function syncLiveActivity(
 	// Push to the full set (resync) OR — on a quiet poll — just the freshly-registered tokens (catch-up).
 	const targets = resyncAll ? tokens : fresh;
 	if (targets.length > 0) {
-		await Promise.all(targets.map((t) => updateLiveActivity(t, state, jwt, apns)));
+		const updateResults = await Promise.all(targets.map((t) => updateLiveActivity(t, state, jwt, apns)));
+		await pruneDeadTokens(sb, "live_activities", "push_token", updateResults);
 		if (resyncAll) await env.MATCH_STATE.put(rsKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
 		if (fresh.length > 0) console.log(`[watcher] LA catch-up ${match.eventId}: ${fresh.length} new`);
 	}
@@ -430,6 +434,7 @@ async function startUpcomingActivities(
 		const results = await Promise.all(tokens.map((t) => startLiveActivity(t, attrs, state, jwt, apns)));
 		const ok = results.filter((r) => r.ok).length;
 		console.log(`[watcher] LA start ${info.homeAbbr} vs ${info.awayAbbr}: ${ok}/${tokens.length}`);
+		await pruneDeadTokens(sb, "live_activity_start_tokens", "token", results);
 		await env.MATCH_STATE.put(startedKey, String(now), { expirationTtl: MATCH_STATE_TTL });
 	}
 }

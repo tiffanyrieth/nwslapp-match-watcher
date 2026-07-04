@@ -8,6 +8,8 @@
  * Plain PostgREST over fetch (the SDK isn't needed for a few selects).
  */
 
+import type { ApnsResult } from "./apns";
+
 export interface SupabaseConfig {
 	url: string; // e.g. https://abcd.supabase.co
 	serviceRoleKey: string;
@@ -26,11 +28,53 @@ async function rest<T>(cfg: SupabaseConfig, pathAndQuery: string): Promise<T[]> 
 	return (await res.json()) as T[];
 }
 
+/** DELETE via PostgREST (service-role bypasses RLS). No return — a 204 No Content has no body. */
+async function restDelete(cfg: SupabaseConfig, pathAndQuery: string): Promise<void> {
+	const res = await fetch(`${cfg.url}/rest/v1/${pathAndQuery}`, {
+		method: "DELETE",
+		headers: {
+			apikey: cfg.serviceRoleKey,
+			authorization: `Bearer ${cfg.serviceRoleKey}`,
+		},
+	});
+	if (!res.ok) {
+		throw new Error(`Supabase DELETE ${res.status}: ${await res.text()}`);
+	}
+}
+
 const uniq = (xs: string[]): string[] => [...new Set(xs)];
 const inList = (xs: string[]): string => `(${xs.join(",")})`;
 // Quoted variant for string keys that may contain PostgREST-special chars (the national-team
 // follow keys are "nt:USA" — the colon is safe quoted). Our own values, so no escaping needed.
 const inListQuoted = (xs: string[]): string => `(${xs.map((x) => `"${x}"`).join(",")})`;
+
+/**
+ * Delete tokens APNs told us are dead — the feedback loop Apple intends (otherwise dead rows accumulate
+ * and the watcher keeps fanning out to zombies). A token is dead when APNs returns 410 Unregistered
+ * (app uninstalled) or 400 BadDeviceToken (malformed / wrong environment). NOT status 0 (a transient
+ * network error is not a dead token). `column` varies per table: `device_tokens` /
+ * `live_activity_start_tokens` key on `token`; `live_activities` on `push_token`. Non-fatal — a prune
+ * failure is logged loud and never blocks the send that triggered it.
+ */
+export async function pruneDeadTokens(
+	cfg: SupabaseConfig,
+	table: string,
+	column: string,
+	results: ApnsResult[],
+): Promise<void> {
+	const dead = uniq(
+		results
+			.filter((r) => !r.ok && (r.status === 410 || (r.status === 400 && r.reason === "BadDeviceToken")))
+			.map((r) => r.token),
+	);
+	if (dead.length === 0) return;
+	try {
+		await restDelete(cfg, `${table}?${column}=in.${inListQuoted(dead)}`);
+		console.log(`[watcher] pruned ${dead.length} dead token(s) from ${table}`);
+	} catch (err) {
+		console.log(`[watcher] prune ${table} failed: ${err}`);
+	}
+}
 
 /** The `notification_preferences` columns the watcher can gate on. */
 export type PrefColumn = "kickoff" | "goals" | "halftime" | "full_time";

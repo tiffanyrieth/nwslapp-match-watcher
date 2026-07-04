@@ -215,10 +215,11 @@ function goalBody(scoringSide: Side, play?: ScoringPlay): string {
  * Diff the previous stored state against the current match and emit live events.
  *
  * First sighting (prev === null) only baselines — except kickoff, which fires when
- * a match is seen live in its 1st minute (period 1, clock < 120s). That clock guard
- * means a watcher starting mid-match (clock already high) won't fire a false
- * kickoff. A multi-goal jump between polls collapses to one goal with the current
- * scoreline.
+ * a match is seen live early in the 1st half (period 1, clock < 600s). The 600s window
+ * (widened from 120s) tolerates the proxy scoreboard's cache lag — the watcher's first
+ * "in" sighting is often a few minutes after real kickoff — while still not firing a
+ * false kickoff if a watcher only starts tracking a match long after it began. A
+ * multi-goal jump between polls collapses to one goal with the current scoreline.
  */
 export function detectEvents(prev: StoredState | null, match: Match): MatchEvent[] {
 	const events: MatchEvent[] = [];
@@ -233,8 +234,13 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 		awayScore: match.away.score,
 	};
 
-	// Kickoff — transition into a live 1st minute.
-	if ((!prev || prev.state !== "in") && match.state === "in" && match.period === 1 && match.clock < 120) {
+	// Kickoff — first time we see the match live in the first half. The `(!prev || prev.state !== "in")`
+	// guard + persistent MATCH_STATE mean this fires exactly ONCE (later ticks have prev.state === "in").
+	// Window widened 120s → 600s (2026-07-03): the proxy scoreboard cache can lag real kickoff by up to
+	// ~5 min, so the watcher's FIRST "in" sighting often had clock > 120 and silently skipped kickoff.
+	// 600s tolerates that lag while staying in the early first half (avoids a false kickoff if the watcher
+	// only starts tracking a game long after it began, e.g. after downtime).
+	if ((!prev || prev.state !== "in") && match.state === "in" && match.period === 1 && match.clock < 600) {
 		events.push({
 			...base,
 			type: "kickoff",
