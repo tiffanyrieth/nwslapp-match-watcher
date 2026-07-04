@@ -471,6 +471,7 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 		eventID?: string;
 		event?: string;
 		imageUrl?: string;
+		thumbnailRect?: number[];
 	};
 	try {
 		payload = (await request.json()) as typeof payload;
@@ -492,6 +493,10 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	};
 	if (payload.subtitle) alert.subtitle = payload.subtitle;
 
+	// Crop the collapsed thumbnail to the scoring crest (home side of the default WAS 1–0 card).
+	// Defaulted so the test push exercises the NSE crop; override via the request body.
+	const thumbnailRect = payload.thumbnailRect ?? (event === "goal" ? [12 / 720, 20 / 296, 92 / 720, 92 / 296] : undefined);
+
 	const aps = {
 		aps: {
 			alert,
@@ -504,6 +509,7 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 		matchId: eventID,
 		event,
 		imageUrl,
+		...(thumbnailRect ? { thumbnailRect } : {}),
 	};
 
 	// `token` present → that one device (back-compat). Omitted → fan out to ALL registered V1 device

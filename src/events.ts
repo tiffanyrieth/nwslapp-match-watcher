@@ -32,6 +32,10 @@ export interface ScoreboardEvent {
 		}>;
 		// Scoring plays + cards live here (no subs — those need /summary, Stage D).
 		details?: Array<ScoreboardDetail>;
+		// Venue + broadcast ride the SAME scoreboard payload (mirrors the app's Scoreboard.swift):
+		// venue.fullName ("Audi Field"), broadcasts[].names ["Victory+"]. Used for the kickoff body.
+		venue?: { fullName?: string };
+		broadcasts?: Array<{ names?: string[] }>;
 	}>;
 }
 
@@ -77,6 +81,9 @@ export interface Match {
 	clock: number;
 	/** Scoring plays from the scoreboard details, in document order. */
 	plays: ScoringPlay[];
+	/** Venue name ("Audi Field") + broadcast label ("Victory+") — for the kickoff body. Best-effort. */
+	venue?: string;
+	broadcast?: string;
 }
 
 /** What we persist per match in KV between polls. */
@@ -110,6 +117,8 @@ export interface MatchEvent {
 	minute?: number;
 	/** Short scorer name for the card footer/body (goals only), best-effort. */
 	scorer?: string;
+	/** Which side scored (goals only) — picks the crest the collapsed push thumbnail crops to. */
+	scoringSide?: "home" | "away";
 	/** Pre-correction score — set ONLY for "correction" events, to render the struck-through old score.
 	 *  (We never know WHICH goal/scorer was reversed — ESPN doesn't say — only that the score dropped.) */
 	prevHomeScore?: number;
@@ -154,10 +163,14 @@ export function parseMatch(event: ScoreboardEvent): Match | null {
 	const state = status?.type?.state;
 	if (state !== "in" && state !== "post") return null;
 
-	const competitors = event.competitions?.[0]?.competitors ?? [];
+	const competition = event.competitions?.[0];
+	const competitors = competition?.competitors ?? [];
 	const home = competitors.find((c) => c.homeAway === "home");
 	const away = competitors.find((c) => c.homeAway === "away");
 	if (!home?.team?.id || !away?.team?.id) return null;
+
+	const venue = competition?.venue?.fullName || undefined;
+	const broadcast = competition?.broadcasts?.find((b) => b.names?.length)?.names?.[0] || undefined;
 
 	const side = (c: NonNullable<typeof home>): Side => ({
 		id: c.team!.id!,
@@ -174,7 +187,9 @@ export function parseMatch(event: ScoreboardEvent): Match | null {
 		statusName: status?.type?.name ?? "",
 		period: status?.period ?? 0,
 		clock: status?.clock ?? 0,
-		plays: parsePlays(event.competitions?.[0]?.details),
+		plays: parsePlays(competition?.details),
+		venue,
+		broadcast,
 	};
 }
 
@@ -206,9 +221,32 @@ function latestPlayFor(match: Match, teamId: string): ScoringPlay | undefined {
 	return found;
 }
 
-/** Goal body: name the scorer when ESPN attributed one, else the club (no fabrication). */
-function goalBody(scoringSide: Side, play?: ScoringPlay): string {
-	return play?.scorer ? `${play.scorer} scored.` : `${scoringSide.name} scored.`;
+/** Goal title: "⚽️ T. Rodman scored" — the scorer is the headline. Falls back to the club
+ *  name when ESPN didn't attribute a scorer (no fabrication). ⚽️ is goal-only. */
+function goalTitle(scoringSide: Side, play?: ScoringPlay): string {
+	return `⚽️ ${play?.scorer ?? scoringSide.name} scored`;
+}
+
+/** Goal body: the abbreviated scoreline + minute ("WAS 2–1 HOU · 90'"). The score appears
+ *  here ONCE (the title carries the scorer), replacing the old repeated subtitle. */
+function goalBody(match: Match, play?: ScoringPlay): string {
+	return play?.minute != null ? `${scoreline(match)} · ${play.minute}'` : scoreline(match);
+}
+
+/** Kickoff body: "Audi Field · Victory+" — where + how to watch, the useful kickoff context.
+ *  Falls back to venue-only, then a generic line, when ESPN omits a field. */
+function kickoffBody(match: Match): string {
+	const parts = [match.venue, match.broadcast].filter((s): s is string => !!s);
+	return parts.length ? parts.join(" · ") : "The match is underway.";
+}
+
+/** The last scoring play's "Scorer 45'" line, if a scorer is attributed — used as the
+ *  halftime body when someone scored in the first half (else "It's the break."). */
+function lastScorerLine(match: Match): string | undefined {
+	let last: ScoringPlay | undefined;
+	for (const p of match.plays) if (p.scorer) last = p;
+	if (!last?.scorer) return undefined;
+	return last.minute != null ? `${last.scorer} ${last.minute}'` : last.scorer;
 }
 
 /**
@@ -245,8 +283,8 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 			...base,
 			type: "kickoff",
 			prefColumn: "kickoff",
-			title: `KICKOFF — ${match.home.abbr} vs ${match.away.abbr}`,
-			body: "The match is underway. Follow live.",
+			title: `Kickoff — ${match.home.abbr} vs ${match.away.abbr}`,
+			body: kickoffBody(match),
 		});
 	}
 
@@ -259,9 +297,9 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 				...base,
 				type: "goal",
 				prefColumn: "goals",
-				title: `GOAL — ${scoreline(match)}`,
-				subtitle: play?.minute != null ? `${scoreline(match)} · ${play.minute}'` : scoreline(match),
-				body: goalBody(match.home, play),
+				title: goalTitle(match.home, play),
+				body: goalBody(match, play),
+				scoringSide: "home",
 				minute: play?.minute,
 				scorer: play?.scorer,
 			});
@@ -272,9 +310,9 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 				...base,
 				type: "goal",
 				prefColumn: "goals",
-				title: `GOAL — ${scoreline(match)}`,
-				subtitle: play?.minute != null ? `${scoreline(match)} · ${play.minute}'` : scoreline(match),
-				body: goalBody(match.away, play),
+				title: goalTitle(match.away, play),
+				body: goalBody(match, play),
+				scoringSide: "away",
 				minute: play?.minute,
 				scorer: play?.scorer,
 			});
@@ -283,7 +321,7 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 
 	// Halftime — fired once while STATUS_HALFTIME holds.
 	if (match.state === "in" && match.statusName === "STATUS_HALFTIME" && !prev?.halftimeSent) {
-		events.push({ ...base, type: "halftime", prefColumn: "halftime", title: `Halftime — ${scoreline(match)}`, body: "It's the break." });
+		events.push({ ...base, type: "halftime", prefColumn: "halftime", title: `Halftime — ${scoreline(match)}`, body: lastScorerLine(match) ?? "It's the break." });
 	}
 
 	// Full time — transition from live to ended.
@@ -369,6 +407,22 @@ export function cardUrl(base: string, event: MatchEvent): string {
 }
 
 /**
+ * For a GOAL, the normalized `[x, y, w, h]` crop of the 720×296 card centered on the
+ * SCORING team's crest — the NSE uses it (`UNNotificationAttachmentOptionsThumbnailClippingRectKey`)
+ * so the collapsed push thumbnail shows that crest instead of a shrunk whole-card. Home crest
+ * sits at the left column, away at the right. Non-goals → `undefined` (whole-card thumbnail).
+ * A ~92px square around the ~60px crest (card 720×296, 30px side padding, 26px top); tuned
+ * against the /card layout.
+ */
+function thumbnailRect(event: MatchEvent): number[] | undefined {
+	if (event.type !== "goal" || !event.scoringSide) return undefined;
+	const W = 720, H = 296, s = 92;             // crop a 92px square around the crest
+	const y = 20 / H, h = s / H, w = s / W;
+	const x = event.scoringSide === "home" ? 12 / W : (W - 12 - s) / W;
+	return [x, y, w, h];
+}
+
+/**
  * The APNs payload for a detected event. Rich-notification contract:
  *   - `mutable-content: 1` wakes the Notification Service Extension (required, or
  *     the NSE never runs and the image is never attached).
@@ -396,5 +450,7 @@ export function toPayload(event: MatchEvent, cardBase: string): Record<string, u
 		matchId: event.eventId,
 		event: event.type,
 		imageUrl: cardUrl(cardBase, event),
+		// Goals only: the crest crop for the collapsed thumbnail (the NSE reads it).
+		...(thumbnailRect(event) ? { thumbnailRect: thumbnailRect(event) } : {}),
 	};
 }
