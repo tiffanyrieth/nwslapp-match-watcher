@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	cardUrl,
 	detectEvents,
+	lineupsPublished,
 	nextState,
 	parseMatch,
 	toPayload,
@@ -327,5 +328,24 @@ describe("toPayload", () => {
 		expect((toPayload(goal, cardBase) as { thumbnailRect?: number[] }).thumbnailRect).toHaveLength(4);
 		const [kickoff] = detectEvents(null, match({ period: 1, clock: 30 }));
 		expect((toPayload(kickoff, cardBase) as { thumbnailRect?: number[] }).thumbnailRect).toBeUndefined();
+	});
+});
+
+describe("lineupsPublished", () => {
+	const roster = (starters: number) => ({ roster: Array.from({ length: 20 }, (_, i) => ({ starter: i < starters })) });
+
+	it("false for roster shells (pre-publish, 0 players)", () => {
+		expect(lineupsPublished({ rosters: [{}, {}] })).toBe(false);
+	});
+	it("true once BOTH sides have >=11 starters", () => {
+		expect(lineupsPublished({ rosters: [roster(11), roster(11)] })).toBe(true);
+	});
+	it("false when only one side has posted (partial)", () => {
+		expect(lineupsPublished({ rosters: [roster(11), roster(0)] })).toBe(false);
+	});
+	it("false for a single roster or missing/nullish input", () => {
+		expect(lineupsPublished({ rosters: [roster(11)] })).toBe(false);
+		expect(lineupsPublished(null)).toBe(false);
+		expect(lineupsPublished({})).toBe(false);
 	});
 });
