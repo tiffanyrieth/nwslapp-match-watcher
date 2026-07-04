@@ -108,7 +108,12 @@ describe("detectEvents - kickoff", () => {
 		const events = detectEvents(null, match({ period: 1, clock: 30 }));
 		expect(types(events)).toEqual(["kickoff"]);
 		expect(events[0].prefColumn).toBe("kickoff");
-		expect(events[0].title).toBe("KICKOFF — WAS vs ORL");
+		expect(events[0].title).toBe("Kickoff — WAS vs ORL");
+	});
+
+	it("body shows venue + broadcast (how to watch)", () => {
+		const events = detectEvents(null, match({ period: 1, clock: 30, venue: "Audi Field", broadcast: "Victory+" }));
+		expect(events[0].body).toBe("Audi Field · Victory+");
 	});
 
 	it("does NOT fire when first seen mid-match (clock already high)", () => {
@@ -130,20 +135,20 @@ describe("detectEvents - goals", () => {
 	it("detects the home team scoring, carrying both team ids", () => {
 		const events = detectEvents(stored(withScores(0, 0)), withScores(1, 0));
 		expect(types(events)).toEqual(["goal"]);
-		expect(events[0].title).toBe("GOAL — WAS 1–0 ORL");
-		expect(events[0].body).toBe("Washington Spirit scored.");
+		expect(events[0].title).toBe("⚽️ Washington Spirit scored");
+		expect(events[0].body).toBe("WAS 1–0 ORL");
 		expect(events[0].teamIds).toEqual(["15365", "20905"]);
 	});
 
 	it("detects the away team scoring", () => {
 		const events = detectEvents(stored(withScores(1, 0)), withScores(1, 1));
-		expect(events[0].body).toBe("Orlando Pride scored.");
+		expect(events[0].body).toBe("WAS 1–1 ORL");
 	});
 
 	it("collapses a multi-goal jump into one goal with the current scoreline", () => {
 		const events = detectEvents(stored(withScores(0, 0)), withScores(2, 0));
 		expect(types(events)).toEqual(["goal"]);
-		expect(events[0].title).toBe("GOAL — WAS 2–0 ORL");
+		expect(events[0].body).toBe("WAS 2–0 ORL");
 	});
 
 	it("two goals when both teams score in one tick", () => {
@@ -245,21 +250,22 @@ describe("parseMatch - scoring plays", () => {
 });
 
 describe("detectEvents - scorer attribution", () => {
-	it("names the scorer in the body + subtitle + minute when ESPN attributes it", () => {
+	it("puts the scorer in the title, scoreline + minute in the body, no subtitle", () => {
 		const scored = withScores(1, 0, {
 			plays: [{ teamId: "15365", scorer: "S. Smith", minute: 67 }],
 		});
 		const [goal] = detectEvents(stored(withScores(0, 0)), scored);
-		expect(goal.body).toBe("S. Smith scored.");
-		expect(goal.subtitle).toBe("WAS 1–0 ORL · 67'");
+		expect(goal.title).toBe("⚽️ S. Smith scored");
+		expect(goal.body).toBe("WAS 1–0 ORL · 67'");
+		expect(goal.subtitle).toBeUndefined();
 		expect(goal.scorer).toBe("S. Smith");
 		expect(goal.minute).toBe(67);
 	});
 
 	it("falls back to the club name (no fabrication) when unattributed", () => {
 		const [goal] = detectEvents(stored(withScores(0, 0)), withScores(1, 0));
-		expect(goal.body).toBe("Washington Spirit scored.");
-		expect(goal.subtitle).toBe("WAS 1–0 ORL");
+		expect(goal.body).toBe("WAS 1–0 ORL");
+		expect(goal.subtitle).toBeUndefined();
 		expect(goal.scorer).toBeUndefined();
 	});
 });
@@ -299,7 +305,7 @@ describe("toPayload", () => {
 			event: string;
 			imageUrl: string;
 		};
-		expect(payload.aps.alert.title).toBe("GOAL — WAS 1–0 ORL");
+		expect(payload.aps.alert.title).toBe("⚽️ Washington Spirit scored");
 		expect(payload.aps["mutable-content"]).toBe(1);
 		// thread-id is prefixed so a match's events stack together.
 		expect(payload.aps["thread-id"]).toBe("match-401853925");
@@ -310,9 +316,16 @@ describe("toPayload", () => {
 		expect(payload.imageUrl.startsWith(`${cardBase}/card/401853925?`)).toBe(true);
 	});
 
-	it("includes the subtitle only when the event has one", () => {
+	it("never sets a subtitle (two-line copy after the redesign)", () => {
 		const [kickoff] = detectEvents(null, match({ period: 1, clock: 30 }));
 		const payload = toPayload(kickoff, cardBase) as { aps: { alert: { subtitle?: string } } };
 		expect(payload.aps.alert.subtitle).toBeUndefined();
+	});
+
+	it("adds thumbnailRect for goals, omits it for other events", () => {
+		const [goal] = detectEvents(stored(withScores(0, 0)), withScores(1, 0));
+		expect((toPayload(goal, cardBase) as { thumbnailRect?: number[] }).thumbnailRect).toHaveLength(4);
+		const [kickoff] = detectEvents(null, match({ period: 1, clock: 30 }));
+		expect((toPayload(kickoff, cardBase) as { thumbnailRect?: number[] }).thumbnailRect).toBeUndefined();
 	});
 });

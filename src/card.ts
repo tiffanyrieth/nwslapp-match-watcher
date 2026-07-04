@@ -70,6 +70,31 @@ function accent(abbr: string): string {
 	return ACCENTS[abbr.toUpperCase()] ?? "#8E8E93";
 }
 
+/** "#RRGGBB" → {r,g,b}. */
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+	const h = hex.replace("#", "");
+	return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
+}
+
+/** Mix a hex toward white by `amt` (0–1) — the lightened team tint for the abbreviations. */
+function lighten(hex: string, amt: number): string {
+	const { r, g, b } = hexToRgb(hex);
+	const mix = (c: number) => Math.round(c + (255 - c) * amt);
+	const hx = (c: number) => c.toString(16).padStart(2, "0");
+	return `#${hx(mix(r))}${hx(mix(g))}${hx(mix(b))}`;
+}
+
+/** Team-color wash CSS: home from the left edge, away from the right, at 25% — the same
+ *  wash as the schedule cards + the V2 live activity, layered OVER the base dark gradient. */
+function teamWashCss(homeAbbr: string, awayAbbr: string): string {
+	const h = hexToRgb(accent(homeAbbr)), a = hexToRgb(accent(awayAbbr));
+	return (
+		"linear-gradient(100deg, " +
+		`rgba(${h.r},${h.g},${h.b},0.25) 0%, rgba(${h.r},${h.g},${h.b},0) 34%, ` +
+		`rgba(${a.r},${a.g},${a.b},0) 66%, rgba(${a.r},${a.g},${a.b},0.25) 100%)`
+	);
+}
+
 // Status pill per event (label + foreground + translucent background).
 function pill(event: string): { label: string; fg: string; bg: string } {
 	switch (event) {
@@ -168,7 +193,7 @@ function teamColumn(abbr: string, crest: string | null): Node {
 	return el(
 		"div",
 		{ display: "flex", flexDirection: "column", alignItems: "center", gap: 9, width: 120 },
-		[badge, el("div", { fontSize: 15, fontWeight: 600, color: "rgba(255,255,255,0.8)" }, abbr)],
+		[badge, el("div", { fontSize: 15, fontWeight: 600, color: lighten(accent(abbr), 0.35) }, abbr)],
 	);
 }
 
@@ -264,9 +289,25 @@ async function renderSvg(env: CardEnv, opts: CardOptions): Promise<string> {
 		],
 	);
 
+	// Team-color wash layered OVER the base dark gradient but UNDER the content (an
+	// absolutely-positioned first child paints behind the flex-flow body/footer).
+	const wash = el(
+		"div",
+		{
+			position: "absolute",
+			top: 0,
+			left: 0,
+			width: "100%",
+			height: "100%",
+			backgroundImage: teamWashCss(opts.homeAbbr, opts.awayAbbr),
+		},
+		"",
+	);
+
 	const root = el(
 		"div",
 		{
+			position: "relative",
 			display: "flex",
 			flexDirection: "column",
 			width: "100%",
@@ -276,7 +317,7 @@ async function renderSvg(env: CardEnv, opts: CardOptions): Promise<string> {
 			fontFamily: "Inter",
 			color: "#ffffff",
 		},
-		[body, footer],
+		[wash, body, footer],
 	);
 
 	return satori(root as unknown as Parameters<typeof satori>[0], {
