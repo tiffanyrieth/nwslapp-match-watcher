@@ -94,7 +94,7 @@ export interface StoredState {
 	halftimeSent: boolean;
 }
 
-export type MatchEventType = "kickoff" | "goal" | "halftime" | "fulltime" | "correction";
+export type MatchEventType = "kickoff" | "goal" | "halftime" | "fulltime" | "correction" | "lineup";
 
 /** A detected event, carrying everything to find followers + compose the push. */
 export interface MatchEvent {
@@ -103,7 +103,7 @@ export interface MatchEvent {
 	/** Both teams' ids — a live event in your team's match matters either way. */
 	teamIds: string[];
 	/** The `notification_preferences` column that gates delivery. */
-	prefColumn: "kickoff" | "goals" | "halftime" | "full_time";
+	prefColumn: "kickoff" | "goals" | "halftime" | "full_time" | "lineup_posted";
 	title: string;
 	/** Second alert line (running score + minute). Omitted for events without one. */
 	subtitle?: string;
@@ -201,6 +201,23 @@ export function nextState(prev: StoredState | null, match: Match, fired: MatchEv
 		state: match.state,
 		halftimeSent: (prev?.halftimeSent ?? false) || fired.some((e) => e.type === "halftime"),
 	};
+}
+
+/** The slice of an ESPN `/summary` payload we read to detect a posted lineup. */
+interface SummaryLike {
+	rosters?: Array<{ roster?: Array<{ starter?: boolean }> }>;
+}
+
+/** True once BOTH teams' starting XIs are posted — each roster has ≥11 players marked `starter`.
+ *  Before publish ESPN returns roster "shells" (0 players); a partial (one side only) stays false,
+ *  so the "lineups are in" push fires exactly once, when both XIs are confirmed. ESPN publishes ~1h
+ *  before kickoff; the watcher polls `/summary` cache-busted in the pre-kickoff window (see index.ts). */
+export function lineupsPublished(summary: SummaryLike | null | undefined): boolean {
+	const rosters = summary?.rosters;
+	if (!Array.isArray(rosters) || rosters.length < 2) return false;
+	const starters = (r: { roster?: Array<{ starter?: boolean }> }) =>
+		Array.isArray(r.roster) ? r.roster.filter((p) => p?.starter === true).length : 0;
+	return rosters.every((r) => starters(r) >= 11);
 }
 
 // "WAS 1–0 ORL" — two teams together → abbreviations + en-dash (the app-wide rule).

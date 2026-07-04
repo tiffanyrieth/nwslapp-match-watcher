@@ -104,6 +104,8 @@ function pill(event: string): { label: string; fg: string; bg: string } {
 			return { label: "FT", fg: "#30D158", bg: "rgba(48,209,88,0.18)" };
 		case "correction": // VAR reversal — red, unmistakably NOT a goal
 			return { label: "GOAL DISALLOWED", fg: "#FF453A", bg: "rgba(255,69,58,0.20)" };
+		case "lineup": // starting XI posted, pre-kickoff — blue (kickoff palette)
+			return { label: "LINEUPS", fg: "#64D2FF", bg: "rgba(100,210,255,0.18)" };
 		default: // kickoff + goal are both live
 			return { label: "● LIVE", fg: "#FF453A", bg: "rgba(255,69,58,0.18)" };
 	}
