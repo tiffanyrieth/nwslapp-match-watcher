@@ -77,12 +77,12 @@ export async function pruneDeadTokens(
 }
 
 /** The `notification_preferences` columns the watcher can gate on. */
-export type PrefColumn = "kickoff" | "goals" | "halftime" | "full_time";
+export type PrefColumn = "kickoff" | "goals" | "halftime" | "full_time" | "lineup_posted";
 
 // Whitelist so the column (interpolated into the PostgREST query) can never be
 // anything but a known internal value — these come from our own event types, not
 // user input, but the guard keeps it that way.
-const PREF_COLUMNS: readonly PrefColumn[] = ["kickoff", "goals", "halftime", "full_time"];
+const PREF_COLUMNS: readonly PrefColumn[] = ["kickoff", "goals", "halftime", "full_time", "lineup_posted"];
 
 /**
  * Device tokens to push an event to: users who have match alerts turned ON for EITHER

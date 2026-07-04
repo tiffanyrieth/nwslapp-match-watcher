@@ -29,6 +29,7 @@ import {
 	correctionEvent,
 	detectCorrectionCandidate,
 	detectEvents,
+	lineupsPublished,
 	nextState,
 	parseMatch,
 	toPayload,
@@ -73,6 +74,7 @@ export interface Env {
 // The sibling proxy's scoreboard route, reached via the PROXY service binding (host is
 // ignored by the binding — only the path matters). Shared edge cache, transparent ESPN bytes.
 const PROXY_SCOREBOARD = "https://proxy/scoreboard";
+const PROXY_SUMMARY = "https://proxy/summary";
 
 // The women's national-team ESPN scoreboard slugs — the SAME set the app polls for the schedule
 // (NationalTeamFeed.all in the app's Models/Competition.swift). Reached through the proxy's
@@ -100,6 +102,10 @@ const MATCH_STATE_TTL = 21600; // 6h — auto-expires a match's KV entry after i
 const CORRECTION_DEBOUNCE_MS = 12_000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// "Lineups posted" push: start polling /summary this far before kickoff. ESPN posts the XI ~1h out;
+// 75 min gives margin for an early publish. Cron is per-minute → detection fires within ≤60s of the post.
+const LINEUP_LEAD_MS = 75 * 60 * 1000;
 
 // V2 Live Activity timing.
 const LA_START_LEAD_MS = 20 * 60 * 1000; // remote-start the Activity ≤20 min before kickoff — the token
@@ -348,6 +354,14 @@ async function runWatch(env: Env): Promise<void> {
 	} catch (err) {
 		console.log(`[watcher] LA start pass failed: ${err}`);
 	}
+
+	// SEPARATE pass: poll /summary for matches in the pre-kickoff window and push "Lineups in" once
+	// both starting XIs are posted. KV-deduped; isolated so a /summary hiccup can't break score alerts.
+	try {
+		await checkUpcomingLineups(env, events, sb, apns);
+	} catch (err) {
+		console.log(`[watcher] lineup pass failed: ${err}`);
+	}
 }
 
 /** V2: push the current match state to its running Activities (UPDATE), END them at full time, or skip
@@ -436,6 +450,76 @@ async function startUpcomingActivities(
 		console.log(`[watcher] LA start ${info.homeAbbr} vs ${info.awayAbbr}: ${ok}/${tokens.length}`);
 		await pruneDeadTokens(sb, "live_activity_start_tokens", "token", results);
 		await env.MATCH_STATE.put(startedKey, String(now), { expirationTtl: MATCH_STATE_TTL });
+	}
+}
+
+/** SEPARATE pre-kickoff trigger (NOT detectEvents — lineups aren't on the scoreboard): for matches in
+ *  the pre-kickoff window, poll the per-match `/summary` and, the tick BOTH starting XIs are posted, push
+ *  a one-shot "Lineups in" alert to everyone with `lineup_posted` on for a participating team. KV-deduped.
+ *  `/summary` is fetched CACHE-BUSTED so detection sees ESPN's live state each tick (independent of the
+ *  proxy's pre-kickoff TTL), firing within ≤60s of the post. NWSL only for now (NT feeds would multiply
+ *  the per-minute /summary fetches). */
+async function checkUpcomingLineups(
+	env: Env,
+	events: ScoreboardEvent[],
+	sb: SupabaseConfig,
+	apns: ApnsConfig,
+): Promise<void> {
+	const now = Date.now();
+	for (const event of events) {
+		const ko = kickoffMs(event);
+		if (ko === null || ko < now || ko - now > LINEUP_LEAD_MS) continue;
+		const info = upcomingInfo(event);
+		if (!info) continue;
+		const key = `lineup:${info.matchId}`;
+		if (await env.MATCH_STATE.get(key)) continue; // already fired
+
+		// Cache-busted so we see ESPN's live state, not a cached pre-lineup shell.
+		let summary: unknown;
+		try {
+			const res = await env.PROXY.fetch(`${PROXY_SUMMARY}?event=${info.matchId}&_lc=${now}`, {
+				headers: { Accept: "application/json" },
+			});
+			if (!res.ok) continue;
+			summary = await res.json();
+		} catch (err) {
+			console.log(`[watcher] lineup summary fetch failed (${info.matchId}): ${err}`);
+			continue;
+		}
+		if (!lineupsPublished(summary as Parameters<typeof lineupsPublished>[0])) continue; // not posted yet — retry next tick
+
+		const lineupEvent: MatchEvent = {
+			type: "lineup",
+			eventId: info.matchId,
+			teamIds: [info.homeId, info.awayId],
+			prefColumn: "lineup_posted",
+			title: `Lineups in — ${info.homeAbbr} vs ${info.awayAbbr}`,
+			body: "Starting XIs are posted — see who's playing.",
+			homeAbbr: info.homeAbbr,
+			awayAbbr: info.awayAbbr,
+			homeScore: 0,
+			awayScore: 0,
+		};
+
+		let tokens: string[];
+		try {
+			tokens = await tokensForEvent(sb, [info.homeId, info.awayId], "lineup_posted");
+		} catch (err) {
+			console.log(`[watcher] lineup follower lookup failed (${info.matchId}): ${err}`);
+			continue; // don't mark KV — retry next tick so a transient lookup failure doesn't drop the alert
+		}
+		if (tokens.length > 0) {
+			const jwt = await apnsJwt(apns);
+			const payload = toPayload(lineupEvent, env.WATCHER_PUBLIC_URL);
+			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt, apns)));
+			console.log(`[watcher] lineup ${info.homeAbbr} vs ${info.awayAbbr}: ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
+			await pruneDeadTokens(sb, "device_tokens", "token", results);
+		} else {
+			console.log(`[watcher] lineup ${info.homeAbbr} vs ${info.awayAbbr}: published, 0 opt-ins`);
+		}
+		// Published ⇒ mark fired (the "lineups are in" moment is one-shot), even at 0 opt-ins, so we stop
+		// re-polling /summary every minute for the rest of the window.
+		await env.MATCH_STATE.put(key, String(now), { expirationTtl: MATCH_STATE_TTL });
 	}
 }
 
