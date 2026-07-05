@@ -433,7 +433,7 @@ function crestAbbr(event: MatchEvent): string {
 export function thumbUrl(cardBase: string, event: MatchEvent): string {
 	// ?s= is a STYLE VERSION cache-buster: /thumb responses edge-cache 24h keyed by full URL, so a
 	// tile-design change must bump this or devices keep pulling the old look until the cache expires.
-	return `${cardBase.replace(/\/$/, "")}/thumb/${encodeURIComponent(crestAbbr(event))}?s=2`;
+	return `${cardBase.replace(/\/$/, "")}/thumb/${encodeURIComponent(crestAbbr(event))}?s=3`;
 }
 
 /** Per-event interruption level: goals/VAR/kickoff/full-time punch through Focus modes

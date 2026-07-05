@@ -312,7 +312,7 @@ async function sendV1ForStep(step, h, a) {
 		subtitle = step.hs === step.as ? "It's a draw" : "Winners take the points";
 		crestAbbr = step.hs > step.as ? h : step.as > step.hs ? a : h;
 	} else return;
-	await pushV1({ label: `${event} ${score}`, title, subtitle, event, imageUrl: `${CARD_URL}/thumb/${crestAbbr}?s=2` });
+	await pushV1({ label: `${event} ${score}`, title, subtitle, event, imageUrl: `${CARD_URL}/thumb/${crestAbbr}?s=3` });
 }
 
 /** The "Lineups in" V1 push (--with-v1 inserts it 60s after the pre-start, like the real Stage-D push). */
@@ -322,7 +322,7 @@ async function sendV1Lineup(h, a) {
 		title: `Lineups in: ${h} vs ${a}`,
 		subtitle: "Starting XIs are posted",
 		event: "lineup",
-		imageUrl: `${CARD_URL}/thumb/${h}?s=2`,
+		imageUrl: `${CARD_URL}/thumb/${h}?s=3`,
 	});
 }
 
@@ -383,7 +383,7 @@ async function runCorrection(summary) {
 		title: `GOAL: ${h} ${old.hs}–${old.as} ${a}`,
 		subtitle: scorer ? `${scorer} ${lastGoal.matchMin}'` : "Goal",
 		event: "goal",
-		imageUrl: `${CARD_URL}/thumb/${lastGoal.scoringAbbr ?? h}?s=2`,
+		imageUrl: `${CARD_URL}/thumb/${lastGoal.scoringAbbr ?? h}?s=3`,
 	});
 	if (!g.httpOk) {
 		console.error(g.error ? `\n✗ Goal push errored: ${g.error}` : "\n✗ Goal push reached 0 devices — no registered V1 device tokens. Aborting.");
@@ -396,7 +396,7 @@ async function runCorrection(summary) {
 		title: `NO GOAL: ${h} ${corrected.hs}–${corrected.as} ${a}`,
 		subtitle: "VAR review — goal disallowed",
 		event: "correction",
-		imageUrl: `${CARD_URL}/thumb/${lastGoal.scoringAbbr ?? h}?s=2`,
+		imageUrl: `${CARD_URL}/thumb/${lastGoal.scoringAbbr ?? h}?s=3`,
 	});
 
 	await sleep(2000);

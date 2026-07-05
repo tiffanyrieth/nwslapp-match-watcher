@@ -587,7 +587,7 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	const event = payload.event ?? "goal";
 	// Default to the redesign's shape: square crest attachment (2026-07-05 — no more wide-card
 	// attachments; a square crest IS a clean collapsed thumbnail).
-	const imageUrl = payload.imageUrl ?? `${env.CARD_PUBLIC_URL.replace(/\/$/, "")}/thumb/WAS?s=2`;
+	const imageUrl = payload.imageUrl ?? `${env.CARD_PUBLIC_URL.replace(/\/$/, "")}/thumb/WAS?s=3`;
 
 	// Title + subtitle only (the redesign's two-line contract); body honored if a caller passes one.
 	const alert: Record<string, string> = { title: payload.title ?? "GOAL: WAS 1–0 ORL" };

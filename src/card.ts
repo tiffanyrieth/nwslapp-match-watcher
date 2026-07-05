@@ -398,6 +398,7 @@ export async function handleThumb(request: Request, env: CardEnv, ctx: Execution
 				display: "flex",
 				alignItems: "center",
 				justifyContent: "center",
+				overflow: "hidden",
 				// Solid dark card surface FIRST, team-color wash layered over it — alpha gradient
 				// stops composited over transparency (no backgroundColor) rendered washed-out lavender.
 				backgroundColor: "#1C1C1E",
@@ -405,7 +406,12 @@ export async function handleThumb(request: Request, env: CardEnv, ctx: Execution
 			},
 			[
 				crest
-					? { type: "img", props: { src: crest, width: 440, height: 440, style: { objectFit: "contain" } } }
+					? // OVERSCAN past the tile: every KV crest PNG carries a uniform ~41px (8%) baked-in
+						// transparent border (measured across all 16 clubs, 2026-07-05). Drawing at 573px in
+						// the 512 tile clips ~27px/side of SOURCE — transparent pixels only (27 < 41 for every
+						// club) — so the ART lands at ~94% of the tile instead of ~72%. If the crest set is
+						// ever regenerated with different margins, re-measure before touching this number.
+						{ type: "img", props: { src: crest, width: 573, height: 573, style: { objectFit: "contain", flexShrink: 0 } } }
 					: el(
 							"div",
 							{
