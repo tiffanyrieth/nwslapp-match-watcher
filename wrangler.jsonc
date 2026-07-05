@@ -41,8 +41,10 @@
 	"vars": {
 		"APNS_HOST": "api.push.apple.com",
 		"APNS_BUNDLE_ID": "com.tiffanyrieth.nwslapp.NWSLApp",
-		// This worker's own public origin (where GET /card lives) → goes in `imageUrl`.
-		"WATCHER_PUBLIC_URL": "https://nwslapp-match-watcher.tiffany-rieth.workers.dev",
+		// The sibling nwslapp-card worker's origin (where GET /card renders) → goes in `imageUrl`.
+		// The renderer was split off this worker so its ~3.4MB module graph stops blowing the
+		// cron's cold-start CPU budget. See src/card-worker.ts / wrangler.card.jsonc.
+		"CARD_PUBLIC_URL": "https://nwslapp-card.tiffany-rieth.workers.dev",
 		// The proxy is reached via the PROXY service binding (see "services" above), not a
 		// var — same-account Worker→Worker over workers.dev fails with Cloudflare error 1042.
 	},

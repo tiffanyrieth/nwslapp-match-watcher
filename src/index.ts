@@ -38,7 +38,11 @@ import {
 	type ScoreboardEvent,
 	type StoredState,
 } from "./events";
-import { handleCard } from "./card";
+// NOTE: the /card PNG renderer (satori + resvg-wasm + fonts, ~3.4MB) is NO LONGER imported
+// here. It lives in the sibling `nwslapp-card` worker (src/card-worker.ts + wrangler.card.jsonc)
+// so its cold-start module-eval never touches this cron's per-tick CPU budget — the fix for the
+// "Exceeded CPU Time Limits" errors. This worker only builds card URLs (CARD_PUBLIC_URL) and
+// 302-redirects any /card request that lands here (late-delivered pushes carry the old origin).
 import { activityTokensForMatch, allDeviceTokens, allStartTokens, pruneDeadTokens, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { endLiveActivity, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
@@ -59,8 +63,8 @@ export interface Env {
 	/** APNs host — api.sandbox.push.apple.com (dev) or api.push.apple.com (TestFlight). */
 	APNS_HOST: string;
 
-	/** This worker's own public origin (where GET /card lives) — goes in `imageUrl`. */
-	WATCHER_PUBLIC_URL: string;
+	/** The sibling `nwslapp-card` worker's origin (where GET /card lives) — goes in `imageUrl`. */
+	CARD_PUBLIC_URL: string;
 
 	/** Service binding to the sibling proxy (its /scoreboard + /crest routes). A binding,
 	 *  not a workers.dev fetch: same-account Worker→Worker over the public URL fails with
@@ -140,14 +144,16 @@ export default {
 
 		if (request.method === "GET" && url.pathname === "/") {
 			return new Response(
-				"nwslapp-match-watcher — cron live-event watcher (kickoff/goal/halftime/full-time). POST /test-push (x-trigger-secret) to send a synthetic push. GET /card/<matchId>?e&h&a&hs&as&min&sc renders the match card.",
+				"nwslapp-match-watcher — cron live-event watcher (kickoff/goal/halftime/full-time). POST /test-push (x-trigger-secret) to send a synthetic push. GET /card/* 302-redirects to the nwslapp-card worker.",
 				{ status: 200 },
 			);
 		}
 
-		// Server-rendered match-card PNG attached to rich pushes (downloaded by the NSE).
+		// The card renderer moved to the nwslapp-card worker. Any /card request here is a push
+		// APNs stored and delivered late (its imageUrl carries this old origin) — 302 it onward so
+		// the NSE (which follows redirects) still gets the PNG. Permanent, not a transition shim.
 		if (request.method === "GET" && url.pathname.startsWith("/card/")) {
-			return handleCard(request, env, ctx);
+			return Response.redirect(`${env.CARD_PUBLIC_URL.replace(/\/$/, "")}${url.pathname}${url.search}`, 302);
 		}
 
 		if (request.method === "POST" && url.pathname === "/test-push") {
@@ -251,7 +257,7 @@ async function runWatch(env: Env): Promise<void> {
 			if (tokens.length === 0) return;
 
 			jwt ??= await apnsJwt(apns);
-			const payload = toPayload(ev, env.WATCHER_PUBLIC_URL);
+			const payload = toPayload(ev, env.CARD_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 			console.log(`[watcher] ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 			await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -336,7 +342,7 @@ async function runWatch(env: Env): Promise<void> {
 				}
 				if (tokens.length === 0) continue;
 				jwt ??= await apnsJwt(apns);
-				const payload = toPayload(ev, env.WATCHER_PUBLIC_URL);
+				const payload = toPayload(ev, env.CARD_PUBLIC_URL);
 				const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 				console.log(`[watcher] NT ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 				await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -510,7 +516,7 @@ async function checkUpcomingLineups(
 		}
 		if (tokens.length > 0) {
 			const jwt = await apnsJwt(apns);
-			const payload = toPayload(lineupEvent, env.WATCHER_PUBLIC_URL);
+			const payload = toPayload(lineupEvent, env.CARD_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt, apns)));
 			console.log(`[watcher] lineup ${info.homeAbbr} vs ${info.awayAbbr}: ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 			await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -569,7 +575,7 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	// Default to a real-looking goal card on this worker if the caller didn't pass one.
 	const imageUrl =
 		payload.imageUrl ??
-		`${env.WATCHER_PUBLIC_URL.replace(/\/$/, "")}/card/${eventID}?e=${event}&h=WAS&a=ORL&hs=1&as=0&min=67&sc=${encodeURIComponent("T. Rieth")}`;
+		`${env.CARD_PUBLIC_URL.replace(/\/$/, "")}/card/${eventID}?e=${event}&h=WAS&a=ORL&hs=1&as=0&min=67&sc=${encodeURIComponent("T. Rieth")}`;
 
 	const alert: Record<string, string> = {
 		title: payload.title ?? "GOAL — WAS 1–0 ORL",

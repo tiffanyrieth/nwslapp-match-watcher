@@ -49,6 +49,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const WATCHER_URL = (process.env.WATCHER_URL ?? "https://nwslapp-match-watcher.tiffany-rieth.workers.dev").replace(/\/$/, "");
+// The card renderer moved to the nwslapp-card worker (see wrangler.card.jsonc); imageUrls point there.
+const CARD_URL = (process.env.CARD_URL ?? "https://nwslapp-card.tiffany-rieth.workers.dev").replace(/\/$/, "");
 const PROXY_URL = (process.env.PROXY_URL ?? "https://nwslapp-proxy.tiffany-rieth.workers.dev").replace(/\/$/, "");
 const SECRET = process.env.MANUAL_TRIGGER_SECRET ?? process.env.TRIGGER_SECRET ?? "";
 const FIXTURE_PATH = resolve(__dirname, "../../NWSLApp/NWSLAppTests/Fixtures/summary.json");
@@ -233,7 +235,7 @@ async function send(step, h, a) {
 }
 
 // ── VAR correction test (V1 push + V2 LA rollback) ─────────────────────────────
-const cardImageUrl = (params) => `${WATCHER_URL}/card/${MATCH_ID}?${new URLSearchParams(params).toString()}`;
+const cardImageUrl = (params) => `${CARD_URL}/card/${MATCH_ID}?${new URLSearchParams(params).toString()}`;
 
 async function pushV1({ label, title, body, event, imageUrl }) {
 	const res = await fetch(`${WATCHER_URL}/test-push`, {
