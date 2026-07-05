@@ -660,9 +660,9 @@ async function handleTestActivity(request: Request, env: Env): Promise<Response>
 		min?: number;
 		sc?: string;
 		comp?: string;
-		/** DIAGNOSTIC: `alert: true` (or {title,body}) adds an alert to a START push — A/B test for
-		 *  whether the silent start presents on current iOS. Test-only; the cron never sets this. */
-		alert?: boolean | { title: string; body: string };
+		/** DIAGNOSTIC: `alert: true` (or {title,body,sound?}) adds an alert to a START push. Proven
+		 *  7/4: no alert → iOS never renders. `sound: ""` A/Bs a buzz-free banner. Test-only. */
+		alert?: boolean | { title: string; body: string; sound?: string };
 	};
 	try {
 		p = (await request.json()) as typeof p;

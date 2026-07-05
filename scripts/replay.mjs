@@ -241,7 +241,9 @@ function schedule(steps) {
 async function send(step, h, a) {
 	const mode = step.kind === "pre" ? "start" : step.kind === "end" ? "end" : "update";
 	const body = { mode, matchId: MATCH_ID, phase: step.phase, hs: step.hs, as: step.as };
-	if (mode === "start") Object.assign(body, { h, a, comp: "NWSL" });
+	// PROVEN 7/4: a start push WITHOUT an alert never renders (iOS silently drops it). The alert is
+	// REQUIRED for the card to appear; updates/end stay silent (they modify the existing Activity).
+	if (mode === "start") Object.assign(body, { h, a, comp: "NWSL", alert: true });
 	// Scope the START to one device (its push-to-start token). Updates/end omit token and target every
 	// per-Activity token for this matchId — only YOUR Activity exists for it, so they reach only you too.
 	if (mode === "start" && MY_START_TOKEN) body.token = MY_START_TOKEN;

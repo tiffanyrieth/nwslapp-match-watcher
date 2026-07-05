@@ -93,12 +93,12 @@ export async function startLiveActivity(
 	jwt: string,
 	cfg: ApnsConfig,
 	staleSeconds = 8 * 3600,
-	// DIAGNOSTIC-ONLY (2026-07-04): optional alert so /test-activity can A/B whether the SILENT
-	// start actually presents on current iOS. The 7/1 device finding was "no alert → APNs 200s but
-	// iOS never renders the card"; the alert was later removed per Apple docs ("optional") and the
-	// silent variant was never device-verified (the token bug masked every no-show since). The cron
-	// path passes nothing here, so real-match behavior is unchanged.
-	alert?: { title: string; body: string },
+	// DIAGNOSTIC-ONLY (2026-07-04): optional alert so /test-activity can A/B start-push presentation.
+	// PROVEN on device 7/4: NO alert → APNs 200s but iOS NEVER renders the card; alert → renders.
+	// (The 7/1 finding was right; "alert is optional per docs" was wrong on hardware.) `sound` is the
+	// second A/B axis: omitting it STILL buzzed on device, so `sound: ""` tests whether a buzz-free
+	// banner is possible at all. The cron path passes nothing here (until the design call lands).
+	alert?: { title: string; body: string; sound?: string },
 ): Promise<ApnsResult> {
 	const now = Math.floor(Date.now() / 1000);
 	const aps = compact({
