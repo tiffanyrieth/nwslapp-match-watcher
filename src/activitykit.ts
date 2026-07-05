@@ -81,11 +81,12 @@ async function postLiveActivity(
 }
 
 /** START a Live Activity remotely (push-to-start token). Carries the static attributes + initial state.
- *  INTENTIONALLY SILENT — no `alert` key, so the pre-match card just appears on the lock screen with no
- *  buzz or banner (the `alert` is OPTIONAL for push-to-start per Apple; it's only a "grab attention"
- *  extra). V1 owns the interrupt: the V1 kickoff push is the single buzz at minute 0. Do NOT add an
- *  `alert` here — that would double-notify against V1. Fired ≤20 min pre-kickoff (see LA_START_LEAD_MS)
- *  so every device has time to register its per-Activity token before the whistle. */
+ *  ⚠️ THE ALERT IS REQUIRED TO RENDER (device-proven 2026-07-04, contradicting Apple's "optional" docs):
+ *  a start push WITHOUT an `alert` gets APNs 200 but iOS NEVER presents the card — the original
+ *  no-alert "silent" design shipped invisible Activities on every real game. The buzz-free design is
+ *  `alert` + `sound: ""` (renders card + quiet banner, NO sound/vibration; omitting the sound key
+ *  entirely still BUZZES). V1 keeps the interrupt: its kickoff push at minute 0 is the single buzz.
+ *  Fired ≤20 min pre-kickoff (see LA_START_LEAD_MS) so devices can register per-Activity tokens. */
 export async function startLiveActivity(
 	pushToStartToken: string,
 	attributes: LiveAttributes,

@@ -451,7 +451,18 @@ async function startUpcomingActivities(
 		const jwt = await apnsJwt(apns);
 		const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr);
 		const state = preContentState(kickoffLabel(ko));
-		const results = await Promise.all(tokens.map((t) => startLiveActivity(t, attrs, state, jwt, apns)));
+		// QUIET BANNER (device-proven 7/4): the start push MUST carry an `alert` or iOS silently never
+		// renders the card (APNs 200s regardless — the old no-alert "silent" design shipped invisible
+		// Activities). `sound: ""` keeps it buzz-free: card + banner appear with NO sound/vibration, so
+		// V1's kickoff push at minute 0 remains the single audible interrupt. All three axes A/B'd on
+		// device 2026-07-04: no alert → never renders; alert w/o sound key → renders but BUZZES;
+		// alert + sound:"" → renders, no buzz.
+		const startAlert = {
+			title: `${info.homeAbbr} vs ${info.awayAbbr}`,
+			body: "Live match card is on your lock screen.",
+			sound: "",
+		};
+		const results = await Promise.all(tokens.map((t) => startLiveActivity(t, attrs, state, jwt, apns, undefined, startAlert)));
 		const ok = results.filter((r) => r.ok).length;
 		console.log(`[watcher] LA start ${info.homeAbbr} vs ${info.awayAbbr}: ${ok}/${tokens.length}`);
 		await pruneDeadTokens(sb, "live_activity_start_tokens", "token", results);
