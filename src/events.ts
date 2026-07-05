@@ -95,7 +95,11 @@ export interface StoredState {
 	/** Monotonic virtual kickoff (epoch sec) for the V2 widget clock: ESPN FREEZES `status.clock`
 	 *  at 2700/5400 during stoppage, so re-basing `now − clock` on every push made the widget clock
 	 *  jump back to 45:00 each resync. We keep the EARLIEST virtual kickoff seen within a period
-	 *  (min), so projected elapsed never rewinds; a period change re-bases (halftime pause). */
+	 *  (min), so projected elapsed never rewinds; a period change re-bases (halftime pause).
+	 *  ⚠️ Reconcile ONLY while the clock is RUNNING (see clockRunning): ESPN advances `period` → 2
+	 *  at the START of the halftime break (state stays "in", clock frozen at 2700), so reconciling
+	 *  through the break re-based the anchor at the break's start and Math.min then pinned it there —
+	 *  the ~15-min interval leaked into the widget clock (second half read 1:01+ instead of 46:00). */
 	virtualKickoff?: number;
 	vkPeriod?: number;
 }
@@ -203,12 +207,22 @@ export function parseMatch(event: ScoreboardEvent): Match | null {
 	};
 }
 
+/** True while ESPN's clock is actually ADVANCING — in-progress and not paused at halftime or a
+ *  shootout. Reconciling the virtual kickoff during a pause is what leaked the halftime break into
+ *  the widget clock (see StoredState.virtualKickoff): the pause must leave the anchor untouched so
+ *  the period-change re-base fires at the REAL second-half kickoff and absorbs the break. */
+export function clockRunning(m: Match): boolean {
+	if (m.state !== "in") return false;
+	const n = m.statusName.toUpperCase();
+	return !n.includes("HALFTIME") && !n.includes("SHOOTOUT") && !n.includes("PENALT");
+}
+
 /** The KV state to persist for `match` after this poll (carrying the halftime flag + the monotonic
  *  virtual kickoff — see StoredState.virtualKickoff). `nowSec` is injected so this stays pure. */
 export function nextState(prev: StoredState | null, match: Match, fired: MatchEvent[], nowSec?: number): StoredState {
 	let virtualKickoff = prev?.virtualKickoff;
 	let vkPeriod = prev?.vkPeriod;
-	if (nowSec != null && match.state === "in") {
+	if (nowSec != null && clockRunning(match)) {
 		const candidate = nowSec - match.clock;
 		if (vkPeriod !== match.period || virtualKickoff == null) {
 			virtualKickoff = candidate; // new period (or first sighting) → re-base

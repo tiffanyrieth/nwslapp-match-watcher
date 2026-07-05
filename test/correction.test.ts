@@ -90,12 +90,12 @@ test("confirm: re-read missing (fresh fetch failed) → discard", () => {
 });
 
 // ── correctionEvent: copy + the struck-old-score inputs ───────────────────────
-test("correctionEvent: distinct title, corrected scoreline body, prev scores for the struck card", () => {
+test("correctionEvent: subject-first title, corrected scoreline subtitle, prev scores for the struck card", () => {
 	const ev = correctionEvent({ home: 2, away: 1 }, withScores(1, 1));
 	assert.equal(ev.type, "correction");
 	assert.equal(ev.prefColumn, "goals");
-	assert.equal(ev.title, "Goal Disallowed — VAR Review");
-	assert.equal(ev.body, "WAS 1–1 SEA"); // abbreviations + en-dash, the app-wide rule
+	assert.equal(ev.title, "NO GOAL — Washington Spirit"); // v3 copy: subject-first, matches the attached crest
+	assert.equal(ev.subtitle, "WAS 1–1 SEA · VAR review"); // abbreviations + en-dash, the app-wide rule
 	assert.equal(ev.homeScore, 1);
 	assert.equal(ev.awayScore, 1);
 	assert.equal(ev.prevHomeScore, 2);
