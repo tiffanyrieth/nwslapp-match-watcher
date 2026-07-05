@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-	crestUrl,
+	thumbUrl,
 	detectEvents,
 	lineupsPublished,
 	nextState,
@@ -273,21 +273,21 @@ describe("detectEvents - scorer attribution", () => {
 	});
 });
 
-describe("crestUrl", () => {
+describe("thumbUrl", () => {
 	it("kickoff (no side) → the HOME club's crest; trailing slash tolerated", () => {
 		const [kickoff] = detectEvents(null, match({ period: 1, clock: 30 }));
-		expect(crestUrl("https://p.example/", kickoff)).toBe("https://p.example/crest/WAS");
+		expect(thumbUrl("https://c.example/", kickoff)).toBe("https://c.example/thumb/WAS?s=2");
 	});
 
 	it("goal → the SCORING club's crest", () => {
 		const [goal] = detectEvents(stored(withScores(1, 0)), withScores(1, 1)); // away scores
-		expect(crestUrl("https://p.example", goal)).toBe("https://p.example/crest/ORL");
+		expect(thumbUrl("https://c.example", goal)).toBe("https://c.example/thumb/ORL?s=2");
 	});
 
 	it("full time → the WINNER's crest", () => {
 		const ended = withScores(1, 2, { state: "post" });
 		const ft = detectEvents(stored(withScores(1, 1)), ended).find((e) => e.type === "fulltime");
-		expect(crestUrl("https://p.example", ft!)).toBe("https://p.example/crest/ORL");
+		expect(thumbUrl("https://c.example", ft!)).toBe("https://c.example/thumb/ORL?s=2");
 	});
 });
 
@@ -313,7 +313,7 @@ describe("toPayload", () => {
 		expect(payload.eventID).toBe("401853925"); // kept for the iOS deep-link
 		expect(payload.matchId).toBe("401853925");
 		expect(payload.event).toBe("goal");
-		expect(payload.imageUrl).toBe(`${proxyBase}/crest/WAS`); // scoring club's square crest
+		expect(payload.imageUrl).toBe(`${proxyBase}/thumb/WAS?s=2`); // scoring club's crest tile
 	});
 
 	it("halftime is polite (active), goals punch through (time-sensitive)", () => {

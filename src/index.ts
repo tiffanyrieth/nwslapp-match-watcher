@@ -63,12 +63,9 @@ export interface Env {
 	/** APNs host — api.sandbox.push.apple.com (dev) or api.push.apple.com (TestFlight). */
 	APNS_HOST: string;
 
-	/** The sibling `nwslapp-card` worker's origin — the /card 302 shim target (late-delivered pushes). */
+	/** The sibling `nwslapp-card` worker's origin — V1 pushes attach its /thumb/{ABBR} crest tile
+	 *  (public URL: the NSE downloads over the internet), and /card/* 302s there for late pushes. */
 	CARD_PUBLIC_URL: string;
-
-	/** The proxy's PUBLIC origin — V1 pushes attach its /crest/{ABBR} PNG (the NSE downloads over
-	 *  the public internet, so the PROXY service binding doesn't apply here). */
-	PROXY_PUBLIC_URL: string;
 
 	/** Service binding to the sibling proxy (its /scoreboard + /crest routes). A binding,
 	 *  not a workers.dev fetch: same-account Worker→Worker over the public URL fails with
@@ -261,7 +258,7 @@ async function runWatch(env: Env): Promise<void> {
 			if (tokens.length === 0) return;
 
 			jwt ??= await apnsJwt(apns);
-			const payload = toPayload(ev, env.PROXY_PUBLIC_URL);
+			const payload = toPayload(ev, env.CARD_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 			console.log(`[watcher] ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 			await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -346,7 +343,7 @@ async function runWatch(env: Env): Promise<void> {
 				}
 				if (tokens.length === 0) continue;
 				jwt ??= await apnsJwt(apns);
-				const payload = toPayload(ev, env.PROXY_PUBLIC_URL);
+				const payload = toPayload(ev, env.CARD_PUBLIC_URL);
 				const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 				console.log(`[watcher] NT ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 				await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -533,7 +530,7 @@ async function checkUpcomingLineups(
 		}
 		if (tokens.length > 0) {
 			const jwt = await apnsJwt(apns);
-			const payload = toPayload(lineupEvent, env.PROXY_PUBLIC_URL);
+			const payload = toPayload(lineupEvent, env.CARD_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt, apns)));
 			console.log(`[watcher] lineup ${info.homeAbbr} vs ${info.awayAbbr}: ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 			await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -590,7 +587,7 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	const event = payload.event ?? "goal";
 	// Default to the redesign's shape: square crest attachment (2026-07-05 — no more wide-card
 	// attachments; a square crest IS a clean collapsed thumbnail).
-	const imageUrl = payload.imageUrl ?? `${env.PROXY_PUBLIC_URL.replace(/\/$/, "")}/crest/WAS`;
+	const imageUrl = payload.imageUrl ?? `${env.CARD_PUBLIC_URL.replace(/\/$/, "")}/thumb/WAS?s=2`;
 
 	// Title + subtitle only (the redesign's two-line contract); body honored if a caller passes one.
 	const alert: Record<string, string> = { title: payload.title ?? "GOAL: WAS 1–0 ORL" };

@@ -45,10 +45,6 @@
 		// pushes still resolve their old imageUrls). The renderer was split off this worker so its
 		// ~3.4MB module graph stops blowing the cron's cold-start CPU budget.
 		"CARD_PUBLIC_URL": "https://nwslapp-card.tiffany-rieth.workers.dev",
-		// The proxy's PUBLIC origin — V1 pushes attach /crest/{ABBR} PNGs (2026-07-05 redesign:
-		// square crest attachments replaced the wide match card). Public URL, not the PROXY binding:
-		// the phone's Notification Service Extension downloads it over the internet.
-		"PROXY_PUBLIC_URL": "https://nwslapp-proxy.tiffany-rieth.workers.dev",
 		// The proxy is reached via the PROXY service binding (see "services" above), not a
 		// var — same-account Worker→Worker over workers.dev fails with Cloudflare error 1042.
 	},

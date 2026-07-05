@@ -366,6 +366,86 @@ function parseOptions(url: URL): CardOptions {
  * `imageUrl` so the NSE delivers the text-only notification (honest degrade, never a
  * blank or a push that looks broken).
  */
+/**
+ * GET /thumb/<ABBR>[?id=<espnId>] → a 512×512 notification-thumbnail TILE: the club's crest drawn
+ * LARGE (~86%) on a full-bleed dark tile with a team-color wash. Exists because a bare transparent
+ * crest reads TINY in iOS's fixed ~40pt thumbnail slot (the artwork floats in an invisible box,
+ * and crest PNGs carry padding) — a full-bleed tile makes the thumbnail render edge-to-edge at the
+ * slot's maximum size (owner feedback 2026-07-05, "magnifying glass" complaint). V1 pushes attach
+ * this; same edge-cache-by-URL as /card.
+ */
+export async function handleThumb(request: Request, env: CardEnv, ctx: ExecutionContext): Promise<Response> {
+	const cache = caches.default;
+	const cached = await cache.match(request);
+	if (cached) return cached;
+
+	const url = new URL(request.url);
+	const abbr = url.pathname.slice("/thumb/".length).toUpperCase().replace(/[^A-Z]/g, "");
+	if (!abbr) return new Response("missing abbr", { status: 400 });
+
+	try {
+		await ensureWasm();
+		const crest = await crestDataUri(env, abbr, url.searchParams.get("id") ?? undefined);
+		const a = accent(abbr);
+		const S = 512;
+		// Full-bleed tile: dark card surface with a diagonal team-color wash (same DNA as the
+		// match card / schedule cards). Crest at ~86% of the tile; ring+abbr fallback only.
+		const root = el(
+			"div",
+			{
+				width: S,
+				height: S,
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "center",
+				// Solid dark card surface FIRST, team-color wash layered over it — alpha gradient
+				// stops composited over transparency (no backgroundColor) rendered washed-out lavender.
+				backgroundColor: "#1C1C1E",
+				backgroundImage: `linear-gradient(150deg, ${a}66 0%, ${a}14 45%, ${a}3D 100%)`,
+			},
+			[
+				crest
+					? { type: "img", props: { src: crest, width: 440, height: 440, style: { objectFit: "contain" } } }
+					: el(
+							"div",
+							{
+								width: 300,
+								height: 300,
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+								borderRadius: 150,
+								border: `10px solid ${a}`,
+								color: "#EBEBF5",
+								fontSize: 96,
+								fontWeight: 800,
+							},
+							abbr,
+						),
+			],
+		);
+		const svg = await satori(root as unknown as Parameters<typeof satori>[0], {
+			width: S,
+			height: S,
+			fonts: [
+				{ name: "Inter", data: inter400, weight: 400, style: "normal" },
+				{ name: "Inter", data: inter800, weight: 800, style: "normal" },
+			],
+		});
+		const png = new Resvg(svg, { fitTo: { mode: "width", value: S } }).render().asPng();
+		const body = png.slice().buffer;
+		const res = new Response(body, {
+			status: 200,
+			headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" },
+		});
+		ctx.waitUntil(cache.put(request, res.clone()));
+		return res;
+	} catch (err) {
+		console.log(`[thumb] render failed for ${abbr}: ${err}`);
+		return new Response(`thumb render failed: ${err}`, { status: 500 });
+	}
+}
+
 export async function handleCard(request: Request, env: CardEnv, ctx: ExecutionContext): Promise<Response> {
 	const cache = caches.default;
 	const cached = await cache.match(request);

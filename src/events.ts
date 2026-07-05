@@ -427,9 +427,13 @@ function crestAbbr(event: MatchEvent): string {
 	return event.homeAbbr;
 }
 
-/** The proxy's square transparent crest PNG for an event (public origin — the NSE downloads it). */
-export function crestUrl(proxyBase: string, event: MatchEvent): string {
-	return `${proxyBase.replace(/\/$/, "")}/crest/${encodeURIComponent(crestAbbr(event))}`;
+/** The nwslapp-card worker's 512×512 crest-tile PNG for an event (public origin — the NSE
+ *  downloads it). A TILE, not the bare crest: full-bleed team-color wash + crest at ~86%, so
+ *  iOS's fixed thumbnail slot renders edge-to-edge instead of a tiny floating transparent crest. */
+export function thumbUrl(cardBase: string, event: MatchEvent): string {
+	// ?s= is a STYLE VERSION cache-buster: /thumb responses edge-cache 24h keyed by full URL, so a
+	// tile-design change must bump this or devices keep pulling the old look until the cache expires.
+	return `${cardBase.replace(/\/$/, "")}/thumb/${encodeURIComponent(crestAbbr(event))}?s=2`;
 }
 
 /** Per-event interruption level: goals/VAR/kickoff/full-time punch through Focus modes
@@ -443,15 +447,15 @@ function interruptionLevel(type: MatchEventType): "time-sensitive" | "active" {
  *   - `alert` = title + subtitle ONLY (no body — the copy system's two-line contract).
  *   - `mutable-content: 1` wakes the Notification Service Extension (required, or
  *     the NSE never runs and the image is never attached).
- *   - `imageUrl` (custom) points at the proxy's square crest PNG (scoring club / winner / home —
- *     see crestAbbr). Square attachment ⇒ clean collapsed thumbnail, no crop tricks needed.
+ *   - `imageUrl` (custom) points at the card worker's /thumb crest TILE (scoring club / winner /
+ *     home — see crestAbbr). Full-bleed square ⇒ the collapsed thumbnail renders at max size.
  *   - `thread-id: match-<id>` stacks a match's lineup/kickoff/goal/HT/FT together.
  *   - `interruption-level` is per-event (see interruptionLevel).
  *   - `eventID` is kept verbatim — the iOS tap handler deep-links off it.
  *
- * `proxyBase` is the PROXY's public origin (where GET /crest/{ABBR} lives).
+ * `cardBase` is the nwslapp-card worker's public origin (where GET /thumb/{ABBR} lives).
  */
-export function toPayload(event: MatchEvent, proxyBase: string): Record<string, unknown> {
+export function toPayload(event: MatchEvent, cardBase: string): Record<string, unknown> {
 	const alert: Record<string, string> = { title: event.title };
 	if (event.subtitle) alert.subtitle = event.subtitle;
 	if (event.body) alert.body = event.body; // legacy field — the builders no longer set it
@@ -466,6 +470,6 @@ export function toPayload(event: MatchEvent, proxyBase: string): Record<string, 
 		eventID: event.eventId,
 		matchId: event.eventId,
 		event: event.type,
-		imageUrl: crestUrl(proxyBase, event),
+		imageUrl: thumbUrl(cardBase, event),
 	};
 }

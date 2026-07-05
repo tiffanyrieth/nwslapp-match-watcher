@@ -14,7 +14,7 @@
  * rich push. The watcher's `imageUrl` points here (CARD_PUBLIC_URL), and the watcher keeps a
  * permanent /card/* → 302 redirect for any push APNs stored and delivers late.
  */
-import { handleCard } from "./card";
+import { handleCard, handleThumb } from "./card";
 
 export interface Env {
 	/** Service binding to the sibling proxy (its /crest route, used by card.ts renderSvg).
@@ -34,9 +34,15 @@ export default {
 			);
 		}
 
-		// Server-rendered match-card PNG (downloaded by the NSE). Only route that renders.
+		// Server-rendered match-card PNG (downloaded by the NSE).
 		if (request.method === "GET" && url.pathname.startsWith("/card/")) {
 			return handleCard(request, env, ctx);
+		}
+
+		// 512×512 crest-on-team-color-tile — the V1 push thumbnail (full-bleed so iOS's fixed
+		// thumbnail slot renders it at maximum size; a bare transparent crest reads tiny).
+		if (request.method === "GET" && url.pathname.startsWith("/thumb/")) {
+			return handleThumb(request, env, ctx);
 		}
 
 		return new Response("Not found.", { status: 404 });

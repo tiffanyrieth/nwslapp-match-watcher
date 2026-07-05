@@ -62,6 +62,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ── Config ───────────────────────────────────────────────────────────────────
 const WATCHER_URL = (process.env.WATCHER_URL ?? "https://nwslapp-match-watcher.tiffany-rieth.workers.dev").replace(/\/$/, "");
 const PROXY_URL = (process.env.PROXY_URL ?? "https://nwslapp-proxy.tiffany-rieth.workers.dev").replace(/\/$/, "");
+// V1 push thumbnails come from the nwslapp-card worker's /thumb/{ABBR} crest tiles.
+const CARD_URL = (process.env.CARD_URL ?? "https://nwslapp-card.tiffany-rieth.workers.dev").replace(/\/$/, "");
 const SECRET = process.env.MANUAL_TRIGGER_SECRET ?? process.env.TRIGGER_SECRET ?? "";
 const FIXTURE_PATH = resolve(__dirname, "../../NWSLApp/NWSLAppTests/Fixtures/summary.json");
 
@@ -310,7 +312,7 @@ async function sendV1ForStep(step, h, a) {
 		subtitle = step.hs === step.as ? "It's a draw" : "Winners take the points";
 		crestAbbr = step.hs > step.as ? h : step.as > step.hs ? a : h;
 	} else return;
-	await pushV1({ label: `${event} ${score}`, title, subtitle, event, imageUrl: `${PROXY_URL}/crest/${crestAbbr}` });
+	await pushV1({ label: `${event} ${score}`, title, subtitle, event, imageUrl: `${CARD_URL}/thumb/${crestAbbr}?s=2` });
 }
 
 /** The "Lineups in" V1 push (--with-v1 inserts it 60s after the pre-start, like the real Stage-D push). */
@@ -320,7 +322,7 @@ async function sendV1Lineup(h, a) {
 		title: `Lineups in: ${h} vs ${a}`,
 		subtitle: "Starting XIs are posted",
 		event: "lineup",
-		imageUrl: `${PROXY_URL}/crest/${h}`,
+		imageUrl: `${CARD_URL}/thumb/${h}?s=2`,
 	});
 }
 
@@ -381,7 +383,7 @@ async function runCorrection(summary) {
 		title: `GOAL: ${h} ${old.hs}–${old.as} ${a}`,
 		subtitle: scorer ? `${scorer} ${lastGoal.matchMin}'` : "Goal",
 		event: "goal",
-		imageUrl: `${PROXY_URL}/crest/${lastGoal.scoringAbbr ?? h}`,
+		imageUrl: `${CARD_URL}/thumb/${lastGoal.scoringAbbr ?? h}?s=2`,
 	});
 	if (!g.httpOk) {
 		console.error(g.error ? `\n✗ Goal push errored: ${g.error}` : "\n✗ Goal push reached 0 devices — no registered V1 device tokens. Aborting.");
@@ -394,7 +396,7 @@ async function runCorrection(summary) {
 		title: `NO GOAL: ${h} ${corrected.hs}–${corrected.as} ${a}`,
 		subtitle: "VAR review — goal disallowed",
 		event: "correction",
-		imageUrl: `${PROXY_URL}/crest/${lastGoal.scoringAbbr ?? h}`,
+		imageUrl: `${CARD_URL}/thumb/${lastGoal.scoringAbbr ?? h}?s=2`,
 	});
 
 	await sleep(2000);
