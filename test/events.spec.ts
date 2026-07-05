@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-	cardUrl,
+	thumbUrl,
 	detectEvents,
 	lineupsPublished,
 	nextState,
@@ -112,9 +112,9 @@ describe("detectEvents - kickoff", () => {
 		expect(events[0].title).toBe("Kickoff — WAS vs ORL");
 	});
 
-	it("body shows venue + broadcast (how to watch)", () => {
+	it("subtitle shows venue + broadcast (how to watch)", () => {
 		const events = detectEvents(null, match({ period: 1, clock: 30, venue: "Audi Field", broadcast: "Victory+" }));
-		expect(events[0].body).toBe("Audi Field · Victory+");
+		expect(events[0].subtitle).toBe("Audi Field · Victory+");
 	});
 
 	it("does NOT fire when first seen mid-match (clock already high)", () => {
@@ -136,20 +136,21 @@ describe("detectEvents - goals", () => {
 	it("detects the home team scoring, carrying both team ids", () => {
 		const events = detectEvents(stored(withScores(0, 0)), withScores(1, 0));
 		expect(types(events)).toEqual(["goal"]);
-		expect(events[0].title).toBe("⚽️ Washington Spirit scored");
-		expect(events[0].body).toBe("WAS 1–0 ORL");
+		expect(events[0].title).toBe("GOAL — Washington Spirit"); // subject-first: title = the scoring club
+		expect(events[0].subtitle).toBe("WAS 1–0 ORL"); // unattributed → scoreline only, no fabrication
 		expect(events[0].teamIds).toEqual(["15365", "20905"]);
 	});
 
 	it("detects the away team scoring", () => {
 		const events = detectEvents(stored(withScores(1, 0)), withScores(1, 1));
-		expect(events[0].body).toBe("WAS 1–1 ORL");
+		expect(events[0].title).toBe("GOAL — Orlando Pride");
+		expect(events[0].scoringSide).toBe("away");
 	});
 
 	it("collapses a multi-goal jump into one goal with the current scoreline", () => {
 		const events = detectEvents(stored(withScores(0, 0)), withScores(2, 0));
 		expect(types(events)).toEqual(["goal"]);
-		expect(events[0].body).toBe("WAS 2–0 ORL");
+		expect(events[0].title).toBe("GOAL — Washington Spirit");
 	});
 
 	it("two goals when both teams score in one tick", () => {
@@ -163,7 +164,8 @@ describe("detectEvents - halftime", () => {
 		const half = withScores(1, 0, { statusName: "STATUS_HALFTIME" });
 		const events = detectEvents(prev, half);
 		expect(types(events)).toEqual(["halftime"]);
-		expect(events[0].title).toBe("Halftime — WAS 1–0 ORL");
+		expect(events[0].title).toBe("Halftime");
+		expect(events[0].subtitle).toBe("WAS 1–0 ORL");
 	});
 
 	it("does NOT re-fire once halftimeSent is set", () => {
@@ -174,19 +176,20 @@ describe("detectEvents - halftime", () => {
 });
 
 describe("detectEvents - full time", () => {
-	it("fires on the in -> post transition with a result body", () => {
+	it("fires on the in -> post transition with a result subtitle", () => {
 		const prev = stored(withScores(2, 1)); // state "in"
 		const ended = withScores(2, 1, { state: "post", statusName: "STATUS_FULL_TIME" });
 		const events = detectEvents(prev, ended);
 		expect(types(events)).toEqual(["fulltime"]);
-		expect(events[0].title).toBe("Full Time — WAS 2–1 ORL");
-		expect(events[0].body).toBe("Washington Spirit win.");
+		expect(events[0].title).toBe("Full time");
+		expect(events[0].subtitle).toBe("WAS 2–1 ORL · Washington Spirit win");
+		expect(events[0].scoringSide).toBe("home"); // winner — picks the attached crest
 	});
 
 	it("reports a draw", () => {
 		const prev = stored(withScores(1, 1));
 		const ended = withScores(1, 1, { state: "post" });
-		expect(detectEvents(prev, ended)[0].body).toBe("It's a draw.");
+		expect(detectEvents(prev, ended)[0].subtitle).toBe("WAS 1–1 ORL · It's a draw");
 	});
 
 	it("fires a final-tick goal AND full time together", () => {
@@ -251,62 +254,59 @@ describe("parseMatch - scoring plays", () => {
 });
 
 describe("detectEvents - scorer attribution", () => {
-	it("puts the scorer in the title, scoreline + minute in the body, no subtitle", () => {
+	it("puts the score in the title, scorer + minute in the subtitle (no body)", () => {
 		const scored = withScores(1, 0, {
 			plays: [{ teamId: "15365", scorer: "S. Smith", minute: 67 }],
 		});
 		const [goal] = detectEvents(stored(withScores(0, 0)), scored);
-		expect(goal.title).toBe("⚽️ S. Smith scored");
-		expect(goal.body).toBe("WAS 1–0 ORL · 67'");
-		expect(goal.subtitle).toBeUndefined();
+		expect(goal.title).toBe("GOAL — Washington Spirit");
+		expect(goal.subtitle).toBe("WAS 1–0 ORL · S. Smith 67'");
+		expect(goal.body).toBeUndefined();
 		expect(goal.scorer).toBe("S. Smith");
 		expect(goal.minute).toBe(67);
 	});
 
 	it("falls back to the club name (no fabrication) when unattributed", () => {
 		const [goal] = detectEvents(stored(withScores(0, 0)), withScores(1, 0));
-		expect(goal.body).toBe("WAS 1–0 ORL");
-		expect(goal.subtitle).toBeUndefined();
+		expect(goal.subtitle).toBe("WAS 1–0 ORL");
+		expect(goal.body).toBeUndefined();
 		expect(goal.scorer).toBeUndefined();
 	});
 });
 
-describe("cardUrl", () => {
-	it("encodes event + abbreviations + score + ids; omits absent minute/scorer", () => {
+describe("thumbUrl", () => {
+	it("kickoff (no side) → the HOME club's crest; trailing slash tolerated", () => {
 		const [kickoff] = detectEvents(null, match({ period: 1, clock: 30 }));
-		const url = new URL(cardUrl("https://w.example", kickoff));
-		expect(url.pathname).toBe("/card/401853925");
-		expect(url.searchParams.get("e")).toBe("kickoff");
-		expect(url.searchParams.get("h")).toBe("WAS");
-		expect(url.searchParams.get("a")).toBe("ORL");
-		expect(url.searchParams.get("hid")).toBe("15365");
-		expect(url.searchParams.get("min")).toBeNull();
+		expect(thumbUrl("https://c.example/", kickoff)).toBe("https://c.example/thumb/WAS?s=3");
 	});
 
-	it("carries minute + scorer for an attributed goal", () => {
-		const scored = withScores(2, 1, { plays: [{ teamId: "15365", scorer: "S. Smith", minute: 67 }] });
-		const [goal] = detectEvents(stored(withScores(1, 1)), scored);
-		const url = new URL(cardUrl("https://w.example/", goal));
-		expect(url.searchParams.get("min")).toBe("67");
-		expect(url.searchParams.get("sc")).toBe("S. Smith");
-		expect(url.searchParams.get("hs")).toBe("2");
-		expect(url.searchParams.get("as")).toBe("1");
+	it("goal → the SCORING club's crest", () => {
+		const [goal] = detectEvents(stored(withScores(1, 0)), withScores(1, 1)); // away scores
+		expect(thumbUrl("https://c.example", goal)).toBe("https://c.example/thumb/ORL?s=3");
+	});
+
+	it("full time → the WINNER's crest", () => {
+		const ended = withScores(1, 2, { state: "post" });
+		const ft = detectEvents(stored(withScores(1, 1)), ended).find((e) => e.type === "fulltime");
+		expect(thumbUrl("https://c.example", ft!)).toBe("https://c.example/thumb/ORL?s=3");
 	});
 });
 
 describe("toPayload", () => {
-	const cardBase = "https://nwslapp-match-watcher.example";
+	const proxyBase = "https://nwslapp-proxy.example";
 
-	it("builds the rich contract: alert + mutable-content + thread-id + level + imageUrl", () => {
+	it("builds the contract: title+subtitle alert + mutable-content + thread-id + level + crest imageUrl", () => {
 		const [goal] = detectEvents(stored(withScores(0, 0)), withScores(1, 0));
-		const payload = toPayload(goal, cardBase) as {
-			aps: { alert: { title: string }; "mutable-content": number; "thread-id": string; "interruption-level": string };
+		const payload = toPayload(goal, proxyBase) as {
+			aps: { alert: { title: string; subtitle?: string; body?: string }; "mutable-content": number; "thread-id": string; "interruption-level": string };
 			eventID: string;
 			matchId: string;
 			event: string;
 			imageUrl: string;
 		};
-		expect(payload.aps.alert.title).toBe("⚽️ Washington Spirit scored");
+		expect(payload.aps.alert.title).toBe("GOAL — Washington Spirit");
+		expect(payload.aps.alert.subtitle).toBe("WAS 1–0 ORL");
+		expect(payload.aps.alert.body).toBeUndefined(); // two-line contract — no body
 		expect(payload.aps["mutable-content"]).toBe(1);
 		// thread-id is prefixed so a match's events stack together.
 		expect(payload.aps["thread-id"]).toBe("match-401853925");
@@ -314,20 +314,19 @@ describe("toPayload", () => {
 		expect(payload.eventID).toBe("401853925"); // kept for the iOS deep-link
 		expect(payload.matchId).toBe("401853925");
 		expect(payload.event).toBe("goal");
-		expect(payload.imageUrl.startsWith(`${cardBase}/card/401853925?`)).toBe(true);
+		expect(payload.imageUrl).toBe(`${proxyBase}/thumb/WAS?s=3`); // scoring club's crest tile
 	});
 
-	it("never sets a subtitle (two-line copy after the redesign)", () => {
-		const [kickoff] = detectEvents(null, match({ period: 1, clock: 30 }));
-		const payload = toPayload(kickoff, cardBase) as { aps: { alert: { subtitle?: string } } };
-		expect(payload.aps.alert.subtitle).toBeUndefined();
+	it("halftime is polite (active), goals punch through (time-sensitive)", () => {
+		const prev = stored(withScores(1, 0));
+		const half = withScores(1, 0, { statusName: "STATUS_HALFTIME" });
+		const [ht] = detectEvents(prev, half);
+		expect((toPayload(ht, proxyBase) as { aps: { "interruption-level": string } }).aps["interruption-level"]).toBe("active");
 	});
 
-	it("adds thumbnailRect for goals, omits it for other events", () => {
+	it("never sets thumbnailRect (square crest needs no crop)", () => {
 		const [goal] = detectEvents(stored(withScores(0, 0)), withScores(1, 0));
-		expect((toPayload(goal, cardBase) as { thumbnailRect?: number[] }).thumbnailRect).toHaveLength(4);
-		const [kickoff] = detectEvents(null, match({ period: 1, clock: 30 }));
-		expect((toPayload(kickoff, cardBase) as { thumbnailRect?: number[] }).thumbnailRect).toBeUndefined();
+		expect((toPayload(goal, proxyBase) as { thumbnailRect?: number[] }).thumbnailRect).toBeUndefined();
 	});
 });
 

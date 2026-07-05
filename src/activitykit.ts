@@ -81,11 +81,12 @@ async function postLiveActivity(
 }
 
 /** START a Live Activity remotely (push-to-start token). Carries the static attributes + initial state.
- *  INTENTIONALLY SILENT — no `alert` key, so the pre-match card just appears on the lock screen with no
- *  buzz or banner (the `alert` is OPTIONAL for push-to-start per Apple; it's only a "grab attention"
- *  extra). V1 owns the interrupt: the V1 kickoff push is the single buzz at minute 0. Do NOT add an
- *  `alert` here — that would double-notify against V1. Fired ≤20 min pre-kickoff (see LA_START_LEAD_MS)
- *  so every device has time to register its per-Activity token before the whistle. */
+ *  ⚠️ THE ALERT IS REQUIRED TO RENDER (device-proven 2026-07-04, contradicting Apple's "optional" docs):
+ *  a start push WITHOUT an `alert` gets APNs 200 but iOS NEVER presents the card — the original
+ *  no-alert "silent" design shipped invisible Activities on every real game. The buzz-free design is
+ *  `alert` + `sound: ""` (renders card + quiet banner, NO sound/vibration; omitting the sound key
+ *  entirely still BUZZES). V1 keeps the interrupt: its kickoff push at minute 0 is the single buzz.
+ *  Fired ≤20 min pre-kickoff (see LA_START_LEAD_MS) so devices can register per-Activity tokens. */
 export async function startLiveActivity(
 	pushToStartToken: string,
 	attributes: LiveAttributes,
@@ -93,6 +94,12 @@ export async function startLiveActivity(
 	jwt: string,
 	cfg: ApnsConfig,
 	staleSeconds = 8 * 3600,
+	// DIAGNOSTIC-ONLY (2026-07-04): optional alert so /test-activity can A/B start-push presentation.
+	// PROVEN on device 7/4: NO alert → APNs 200s but iOS NEVER renders the card; alert → renders.
+	// (The 7/1 finding was right; "alert is optional per docs" was wrong on hardware.) `sound` is the
+	// second A/B axis: omitting it STILL buzzed on device, so `sound: ""` tests whether a buzz-free
+	// banner is possible at all. The cron path passes nothing here (until the design call lands).
+	alert?: { title: string; body: string; sound?: string },
 ): Promise<ApnsResult> {
 	const now = Math.floor(Date.now() / 1000);
 	const aps = compact({
@@ -103,17 +110,21 @@ export async function startLiveActivity(
 		"content-state": compact(state),
 		"stale-date": now + staleSeconds,
 		"relevance-score": 100,
+		...(alert ? { alert } : {}),
 	});
 	return postLiveActivity(pushToStartToken, aps, jwt, cfg, "10");
 }
 
-/** UPDATE a running Activity (per-Activity token). Silent — no `alert`, so the phone never buzzes. */
+/** UPDATE a running Activity (per-Activity token). Silent by default — no `alert`, no buzz.
+ *  `opts.alert` (DEVICE-TEST ONLY, 2026-07-05): Apple docs support an alert on updates (sound +
+ *  lit screen + expanded Dynamic Island pop). Plumbed for /test-activity + replay --la-alerts to
+ *  verify on hardware; the CRON passes no alert — a design decision gates any real use. */
 export async function updateLiveActivity(
 	activityToken: string,
 	state: LiveContentState,
 	jwt: string,
 	cfg: ApnsConfig,
-	opts: { staleSeconds?: number; priority?: string } = {},
+	opts: { staleSeconds?: number; priority?: string; alert?: { title: string; body: string; sound?: string } } = {},
 ): Promise<ApnsResult> {
 	const now = Math.floor(Date.now() / 1000);
 	const aps = compact({
@@ -121,17 +132,23 @@ export async function updateLiveActivity(
 		event: "update",
 		"content-state": compact(state),
 		"stale-date": now + (opts.staleSeconds ?? 3600),
+		...(opts.alert ? { alert: opts.alert } : {}),
 	});
 	return postLiveActivity(activityToken, aps, jwt, cfg, opts.priority ?? "10");
 }
 
-/** END a running Activity. `dismissEpoch` keeps the final card on the lock screen until then (FT+~15m). */
+/** END a running Activity. `dismissEpoch` OMITTED → system default: the final card lingers on the
+ *  lock screen up to Apple's ~4h cap (dates further out are ignored), user-dismissable anytime —
+ *  the real cron's behavior (owner request 2026-07-05). Tests pass a short epoch so their cards
+ *  self-clean. `alert` — same DEVICE-TEST ONLY knob as updateLiveActivity (end alerts appear to be
+ *  IGNORED by iOS per the 7/5 device test — kept for re-testing on future iOS versions). */
 export async function endLiveActivity(
 	activityToken: string,
 	finalState: LiveContentState,
 	jwt: string,
 	cfg: ApnsConfig,
-	dismissEpoch: number,
+	dismissEpoch?: number,
+	alert?: { title: string; body: string; sound?: string },
 ): Promise<ApnsResult> {
 	const now = Math.floor(Date.now() / 1000);
 	const aps = compact({
@@ -139,6 +156,7 @@ export async function endLiveActivity(
 		event: "end",
 		"content-state": compact(finalState),
 		"dismissal-date": dismissEpoch,
+		...(alert ? { alert } : {}),
 	});
 	return postLiveActivity(activityToken, aps, jwt, cfg, "10");
 }

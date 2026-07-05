@@ -92,6 +92,12 @@ export interface StoredState {
 	away: { id: string; score: number };
 	state: string;
 	halftimeSent: boolean;
+	/** Monotonic virtual kickoff (epoch sec) for the V2 widget clock: ESPN FREEZES `status.clock`
+	 *  at 2700/5400 during stoppage, so re-basing `now − clock` on every push made the widget clock
+	 *  jump back to 45:00 each resync. We keep the EARLIEST virtual kickoff seen within a period
+	 *  (min), so projected elapsed never rewinds; a period change re-bases (halftime pause). */
+	virtualKickoff?: number;
+	vkPeriod?: number;
 }
 
 export type MatchEventType = "kickoff" | "goal" | "halftime" | "fulltime" | "correction" | "lineup";
@@ -104,20 +110,24 @@ export interface MatchEvent {
 	teamIds: string[];
 	/** The `notification_preferences` column that gates delivery. */
 	prefColumn: "kickoff" | "goals" | "halftime" | "full_time" | "lineup_posted";
+	/** Title = `Event: scoreline/matchup` — caps only on the two peaks (GOAL / NO GOAL). */
 	title: string;
-	/** Second alert line (running score + minute). Omitted for events without one. */
+	/** Subtitle = the ONE detail line (scorer/venue·broadcast/winner). The 2026-07-05 redesign is
+	 *  title+subtitle only — no body (too wordy for a push; we lack assist/tactical data anyway). */
 	subtitle?: string;
-	body: string;
-	/** Card inputs — both abbreviations + the running score at this event. */
+	/** Legacy third line — no longer set by the builders; kept optional so old tests type-check. */
+	body?: string;
+	/** Crest/attachment inputs — both abbreviations + the running score at this event. */
 	homeAbbr: string;
 	awayAbbr: string;
 	homeScore: number;
 	awayScore: number;
-	/** Match minute for the card/subtitle (goals + live), best-effort. */
+	/** Match minute for the subtitle (goals + live), best-effort. */
 	minute?: number;
-	/** Short scorer name for the card footer/body (goals only), best-effort. */
+	/** Short scorer name for the subtitle (goals only), best-effort. */
 	scorer?: string;
-	/** Which side scored (goals only) — picks the crest the collapsed push thumbnail crops to. */
+	/** Which side the event belongs to — picks the attached crest: goals = the scoring club;
+	 *  corrections = the club whose goal was disallowed. */
 	scoringSide?: "home" | "away";
 	/** Pre-correction score — set ONLY for "correction" events, to render the struck-through old score.
 	 *  (We never know WHICH goal/scorer was reversed — ESPN doesn't say — only that the score dropped.) */
@@ -193,13 +203,27 @@ export function parseMatch(event: ScoreboardEvent): Match | null {
 	};
 }
 
-/** The KV state to persist for `match` after this poll (carrying the halftime flag). */
-export function nextState(prev: StoredState | null, match: Match, fired: MatchEvent[]): StoredState {
+/** The KV state to persist for `match` after this poll (carrying the halftime flag + the monotonic
+ *  virtual kickoff — see StoredState.virtualKickoff). `nowSec` is injected so this stays pure. */
+export function nextState(prev: StoredState | null, match: Match, fired: MatchEvent[], nowSec?: number): StoredState {
+	let virtualKickoff = prev?.virtualKickoff;
+	let vkPeriod = prev?.vkPeriod;
+	if (nowSec != null && match.state === "in") {
+		const candidate = nowSec - match.clock;
+		if (vkPeriod !== match.period || virtualKickoff == null) {
+			virtualKickoff = candidate; // new period (or first sighting) → re-base
+			vkPeriod = match.period;
+		} else {
+			virtualKickoff = Math.min(virtualKickoff, candidate); // frozen clock drifts candidate LATER — keep earliest
+		}
+	}
 	return {
 		home: { id: match.home.id, score: match.home.score },
 		away: { id: match.away.id, score: match.away.score },
 		state: match.state,
 		halftimeSent: (prev?.halftimeSent ?? false) || fired.some((e) => e.type === "halftime"),
+		virtualKickoff,
+		vkPeriod,
 	};
 }
 
@@ -220,15 +244,30 @@ export function lineupsPublished(summary: SummaryLike | null | undefined): boole
 	return rosters.every((r) => starters(r) >= 11);
 }
 
-// "WAS 1–0 ORL" — two teams together → abbreviations + en-dash (the app-wide rule).
+// ── Copy system (2026-07-05 v3 — subject-first) ───────────────────────────────
+// Title leads with the event + its SUBJECT (the club that acted), so the title always agrees
+// with the attached crest — "GOAL: NC 0–1 SEA" + a SEA crest read as if NC scored (owner UX
+// finding; the DC United app's hierarchy is the industry standard here). Line 2 = the macro
+// scoreboard + detail, `·`-separated. NO body. Two teams together → abbreviations + en-dash;
+// one team as subject (scorer's club, FT winner) → full club name. Caps only on GOAL/NO GOAL.
+
+// "WAS 1–0 ORL"
 function scoreline(match: Match): string {
 	return `${match.home.abbr} ${match.home.score}–${match.away.score} ${match.away.abbr}`;
 }
 
-function fullTimeBody(match: Match): string {
-	if (match.home.score > match.away.score) return `${match.home.name} win.`;
-	if (match.away.score > match.home.score) return `${match.away.name} win.`;
-	return "It's a draw.";
+// "WAS vs ORL" — the pre-score matchup form (kickoff/lineups).
+function matchup(match: Match): string {
+	return `${match.home.abbr} vs ${match.away.abbr}`;
+}
+
+/** FT line 2: "NC 2–1 SEA · North Carolina Courage win" (winner = full club name, matching
+ *  the attached winner's crest) / "… · It's a draw". */
+function fullTimeSubtitle(match: Match): string {
+	const score = scoreline(match);
+	if (match.home.score > match.away.score) return `${score} · ${match.home.name} win`;
+	if (match.away.score > match.home.score) return `${score} · ${match.away.name} win`;
+	return `${score} · It's a draw`;
 }
 
 /** The most recent scoring play attributed to `teamId`, if any. */
@@ -238,27 +277,23 @@ function latestPlayFor(match: Match, teamId: string): ScoringPlay | undefined {
 	return found;
 }
 
-/** Goal title: "⚽️ T. Rodman scored" — the scorer is the headline. Falls back to the club
- *  name when ESPN didn't attribute a scorer (no fabrication). ⚽️ is goal-only. */
-function goalTitle(scoringSide: Side, play?: ScoringPlay): string {
-	return `⚽️ ${play?.scorer ?? scoringSide.name} scored`;
+/** Goal line 2: "NC 0–1 SEA · S. Menti 19'" — the macro scoreboard, then scorer + minute
+ *  (degrading gracefully to whichever is attributed; never fabricated). */
+function goalSubtitle(match: Match, play?: ScoringPlay): string {
+	const score = scoreline(match);
+	if (!play?.scorer) return score;
+	return play.minute != null ? `${score} · ${play.scorer} ${play.minute}'` : `${score} · ${play.scorer}`;
 }
 
-/** Goal body: the abbreviated scoreline + minute ("WAS 2–1 HOU · 90'"). The score appears
- *  here ONCE (the title carries the scorer), replacing the old repeated subtitle. */
-function goalBody(match: Match, play?: ScoringPlay): string {
-	return play?.minute != null ? `${scoreline(match)} · ${play.minute}'` : scoreline(match);
-}
-
-/** Kickoff body: "Audi Field · Victory+" — where + how to watch, the useful kickoff context.
- *  Falls back to venue-only, then a generic line, when ESPN omits a field. */
-function kickoffBody(match: Match): string {
+/** Kickoff subtitle: "Audi Field · Victory+" — where + how to watch (the old body's info,
+ *  preserved). Falls back to venue-only, then a generic line, when ESPN omits a field. */
+function kickoffSubtitle(match: Match): string {
 	const parts = [match.venue, match.broadcast].filter((s): s is string => !!s);
-	return parts.length ? parts.join(" · ") : "The match is underway.";
+	return parts.length ? parts.join(" · ") : "The match is underway";
 }
 
-/** The last scoring play's "Scorer 45'" line, if a scorer is attributed — used as the
- *  halftime body when someone scored in the first half (else "It's the break."). */
+/** The last scoring play's "Scorer 45'" line, if a scorer is attributed — the halftime
+ *  subtitle when someone scored in the first half (else "It's the break"). */
 function lastScorerLine(match: Match): string | undefined {
 	let last: ScoringPlay | undefined;
 	for (const p of match.plays) if (p.scorer) last = p;
@@ -300,8 +335,8 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 			...base,
 			type: "kickoff",
 			prefColumn: "kickoff",
-			title: `Kickoff — ${match.home.abbr} vs ${match.away.abbr}`,
-			body: kickoffBody(match),
+			title: `Kickoff — ${matchup(match)}`,
+			subtitle: kickoffSubtitle(match),
 		});
 	}
 
@@ -314,8 +349,8 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 				...base,
 				type: "goal",
 				prefColumn: "goals",
-				title: goalTitle(match.home, play),
-				body: goalBody(match, play),
+				title: `GOAL — ${match.home.name}`,
+				subtitle: goalSubtitle(match, play),
 				scoringSide: "home",
 				minute: play?.minute,
 				scorer: play?.scorer,
@@ -327,8 +362,8 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 				...base,
 				type: "goal",
 				prefColumn: "goals",
-				title: goalTitle(match.away, play),
-				body: goalBody(match, play),
+				title: `GOAL — ${match.away.name}`,
+				subtitle: goalSubtitle(match, play),
 				scoringSide: "away",
 				minute: play?.minute,
 				scorer: play?.scorer,
@@ -338,12 +373,14 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 
 	// Halftime — fired once while STATUS_HALFTIME holds.
 	if (match.state === "in" && match.statusName === "STATUS_HALFTIME" && !prev?.halftimeSent) {
-		events.push({ ...base, type: "halftime", prefColumn: "halftime", title: `Halftime — ${scoreline(match)}`, body: lastScorerLine(match) ?? "It's the break." });
+		const scorers = lastScorerLine(match);
+		events.push({ ...base, type: "halftime", prefColumn: "halftime", title: "Halftime", subtitle: scorers ? `${scoreline(match)} · ${scorers}` : scoreline(match) });
 	}
 
-	// Full time — transition from live to ended.
+	// Full time — transition from live to ended. Winner's crest attaches (draw → home).
 	if (prev && prev.state === "in" && match.state === "post") {
-		events.push({ ...base, type: "fulltime", prefColumn: "full_time", title: `Full Time — ${scoreline(match)}`, body: fullTimeBody(match) });
+		const winnerSide = match.home.score > match.away.score ? "home" : match.away.score > match.home.score ? "away" : undefined;
+		events.push({ ...base, type: "fulltime", prefColumn: "full_time", title: "Full time", subtitle: fullTimeSubtitle(match), scoringSide: winnerSide });
 	}
 
 	return events;
@@ -385,89 +422,82 @@ export function confirmCorrection(candidate: CorrectionCandidate, recheck: Match
 	return recheck.home.score < candidate.prev.home || recheck.away.score < candidate.prev.away;
 }
 
-/** Build the "Goal Disallowed — VAR Review" event from the confirmed (corrected) match reading. */
+/** Build the "NO GOAL" VAR event from the confirmed (corrected) match reading. */
 export function correctionEvent(prev: { home: number; away: number }, match: Match): MatchEvent {
+	// Which side's goal was disallowed (their score dropped) — picks the attached crest.
+	const disallowedSide = match.home.score < prev.home ? "home" : match.away.score < prev.away ? "away" : undefined;
 	return {
 		type: "correction",
 		eventId: match.eventId,
 		teamIds: [match.home.id, match.away.id],
 		prefColumn: "goals", // whoever opted into goal alerts wants to know one was reversed
-		title: "Goal Disallowed — VAR Review",
-		body: scoreline(match), // corrected score (e.g. "WAS 1–1 SEA"); the title carries the reversal
+		// Subject-first: name the club whose goal was disallowed (matches the attached crest);
+		// fall back to a neutral title if ESPN's numbers didn't isolate a side.
+		title: disallowedSide ? `NO GOAL — ${(disallowedSide === "home" ? match.home : match.away).name}` : "NO GOAL — VAR review",
+		subtitle: `${scoreline(match)} · VAR review`,
 		homeAbbr: match.home.abbr,
 		awayAbbr: match.away.abbr,
 		homeScore: match.home.score,
 		awayScore: match.away.score,
+		scoringSide: disallowedSide,
 		prevHomeScore: prev.home,
 		prevAwayScore: prev.away,
 	};
 }
 
-/** The server-rendered match-card URL for an event (crests + score + status pill). */
-export function cardUrl(base: string, event: MatchEvent): string {
-	const params = new URLSearchParams({
-		e: event.type,
-		h: event.homeAbbr,
-		a: event.awayAbbr,
-		hs: String(event.homeScore),
-		as: String(event.awayScore),
-	});
-	if (event.minute != null) params.set("min", String(event.minute));
-	if (event.scorer) params.set("sc", event.scorer);
-	// Correction only: the prior score, so the card can strike it through next to the corrected one.
-	if (event.prevHomeScore != null) params.set("oh", String(event.prevHomeScore));
-	if (event.prevAwayScore != null) params.set("oa", String(event.prevAwayScore));
-	// ESPN team ids enable the card's middle crest fallback (proxy → ESPN CDN → ring).
-	if (event.teamIds[0]) params.set("hid", event.teamIds[0]);
-	if (event.teamIds[1]) params.set("aid", event.teamIds[1]);
-	return `${base.replace(/\/$/, "")}/card/${event.eventId}?${params.toString()}`;
+/** Which club's crest attaches to an event: goals → the scoring club; corrections → the club
+ *  whose goal was disallowed; full time → the winner (draw falls through to home); everything
+ *  else → home. A square transparent crest IS a clean collapsed thumbnail — the old wide-card
+ *  attachment crushed into an unreadable 1:1 blob, which this redesign kills structurally. */
+function crestAbbr(event: MatchEvent): string {
+	if (event.scoringSide === "away") return event.awayAbbr;
+	if (event.scoringSide === "home") return event.homeAbbr;
+	return event.homeAbbr;
+}
+
+/** The nwslapp-card worker's 512×512 crest-tile PNG for an event (public origin — the NSE
+ *  downloads it). A TILE, not the bare crest: full-bleed team-color wash + crest at ~86%, so
+ *  iOS's fixed thumbnail slot renders edge-to-edge instead of a tiny floating transparent crest. */
+export function thumbUrl(cardBase: string, event: MatchEvent): string {
+	// ?s= is a STYLE VERSION cache-buster: /thumb responses edge-cache 24h keyed by full URL, so a
+	// tile-design change must bump this or devices keep pulling the old look until the cache expires.
+	return `${cardBase.replace(/\/$/, "")}/thumb/${encodeURIComponent(crestAbbr(event))}?s=3`;
+}
+
+/** Per-event interruption level: goals/VAR/kickoff/full-time punch through Focus modes
+ *  (time-sensitive — only valuable in the moment); lineups + halftime stay polite. */
+function interruptionLevel(type: MatchEventType): "time-sensitive" | "active" {
+	return type === "halftime" || type === "lineup" ? "active" : "time-sensitive";
 }
 
 /**
- * For a GOAL, the normalized `[x, y, w, h]` crop of the 720×296 card centered on the
- * SCORING team's crest — the NSE uses it (`UNNotificationAttachmentOptionsThumbnailClippingRectKey`)
- * so the collapsed push thumbnail shows that crest instead of a shrunk whole-card. Home crest
- * sits at the left column, away at the right. Non-goals → `undefined` (whole-card thumbnail).
- * A ~92px square around the ~60px crest (card 720×296, 30px side padding, 26px top); tuned
- * against the /card layout.
- */
-function thumbnailRect(event: MatchEvent): number[] | undefined {
-	if (event.type !== "goal" || !event.scoringSide) return undefined;
-	const W = 720, H = 296, s = 92;             // crop a 92px square around the crest
-	const y = 20 / H, h = s / H, w = s / W;
-	const x = event.scoringSide === "home" ? 12 / W : (W - 12 - s) / W;
-	return [x, y, w, h];
-}
-
-/**
- * The APNs payload for a detected event. Rich-notification contract:
+ * The APNs payload for a detected event (2026-07-05 redesign: title+subtitle, crest attachment).
+ *   - `alert` = title + subtitle ONLY (no body — the copy system's two-line contract).
  *   - `mutable-content: 1` wakes the Notification Service Extension (required, or
  *     the NSE never runs and the image is never attached).
- *   - `imageUrl` (custom) points at the server-rendered match card the NSE downloads.
- *   - `thread-id: match-<id>` stacks a match's kickoff/goal/HT/FT together.
- *   - `interruption-level: time-sensitive` — a live-match alert only has value while
- *     the match is live, so it should surface promptly (day-before stays default,
- *     but that's a Tier-1 LOCAL notification scheduled on-device, not this path).
+ *   - `imageUrl` (custom) points at the card worker's /thumb crest TILE (scoring club / winner /
+ *     home — see crestAbbr). Full-bleed square ⇒ the collapsed thumbnail renders at max size.
+ *   - `thread-id: match-<id>` stacks a match's lineup/kickoff/goal/HT/FT together.
+ *   - `interruption-level` is per-event (see interruptionLevel).
  *   - `eventID` is kept verbatim — the iOS tap handler deep-links off it.
  *
- * `cardBase` is the watcher's own public origin (where GET /card lives).
+ * `cardBase` is the nwslapp-card worker's public origin (where GET /thumb/{ABBR} lives).
  */
 export function toPayload(event: MatchEvent, cardBase: string): Record<string, unknown> {
-	const alert: Record<string, string> = { title: event.title, body: event.body };
+	const alert: Record<string, string> = { title: event.title };
 	if (event.subtitle) alert.subtitle = event.subtitle;
+	if (event.body) alert.body = event.body; // legacy field — the builders no longer set it
 	return {
 		aps: {
 			alert,
 			"mutable-content": 1,
 			sound: "default",
 			"thread-id": `match-${event.eventId}`,
-			"interruption-level": "time-sensitive",
+			"interruption-level": interruptionLevel(event.type),
 		},
 		eventID: event.eventId,
 		matchId: event.eventId,
 		event: event.type,
-		imageUrl: cardUrl(cardBase, event),
-		// Goals only: the crest crop for the collapsed thumbnail (the NSE reads it).
-		...(thumbnailRect(event) ? { thumbnailRect: thumbnailRect(event) } : {}),
+		imageUrl: thumbUrl(cardBase, event),
 	};
 }

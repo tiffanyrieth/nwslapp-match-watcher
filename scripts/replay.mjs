@@ -33,10 +33,22 @@
  *   ... --correction         VAR test: fire the last goal as a V1 push, then DISALLOW it — a V1
  *                            correction push (red card, struck score, stacks via thread-id) + a silent
  *                            V2 Live Activity score rollback. Mirrors the brief's goal-then-correction.
+ *   ... --with-v1            ALSO fire the matching V1 rich push at each moment (kickoff/goal/HT/FT,
+ *                            card image attached) — the full "every toggle on" experience. Set
+ *                            MY_DEVICE_TOKEN to scope the V1 pushes to one phone.
+ *   ... --la-alerts          DEVICE TEST: audible alerts ON THE V2 UPDATE/END pushes themselves
+ *                            (kickoff/goals/HT/FT buzz via the Live Activity channel, no V1).
+ *   ... --ht-hold=<sec>      dwell at halftime this long before the second half.
  *
- * NOTE: a push-started Activity uploads its per-Activity update token to Supabase only while the app is
- * RUNNING to observe it. Keep the test phone's app OPEN around the start, or use --start-only (open app,
- * confirm a live_activities row) then --updates-only to drive the rest.
+ * NOTE (6/30 findings — the two traps that waste a whole session if forgotten):
+ *   1. The per-Activity update token takes MINUTES to check in after the start (device must receive the
+ *      push, create the Activity, upload the token — and ONLY while the app is RUNNING to observe it).
+ *      This is why LA_START_LEAD_MS is 20 min. A short --start-hold → every update hits 0 tokens.
+ *   2. `start → 1/1 ok` means APNs ACCEPTED the push-to-start — NOT that the card rendered or the token
+ *      checked in. Those are separate; verify the card on-screen and a live_activities row separately.
+ *   RELIABLE recipe: --start-only (app OPEN + foregrounded) → wait, confirm a live_activities row for the
+ *   matchId → --updates-only. Don't gamble on a fixed inline hold.
+ *   (The compressed clock "jumping" between real minutes is EXPECTED, not a bug.)
  *
  * ENV: MANUAL_TRIGGER_SECRET (required unless --dry-run), WATCHER_URL, PROXY_URL (sensible defaults below).
  */
@@ -50,8 +62,24 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ── Config ───────────────────────────────────────────────────────────────────
 const WATCHER_URL = (process.env.WATCHER_URL ?? "https://nwslapp-match-watcher.tiffany-rieth.workers.dev").replace(/\/$/, "");
 const PROXY_URL = (process.env.PROXY_URL ?? "https://nwslapp-proxy.tiffany-rieth.workers.dev").replace(/\/$/, "");
+// V1 push thumbnails come from the nwslapp-card worker's /thumb/{ABBR} crest tiles.
+const CARD_URL = (process.env.CARD_URL ?? "https://nwslapp-card.tiffany-rieth.workers.dev").replace(/\/$/, "");
 const SECRET = process.env.MANUAL_TRIGGER_SECRET ?? process.env.TRIGGER_SECRET ?? "";
 const FIXTURE_PATH = resolve(__dirname, "../../NWSLApp/NWSLAppTests/Fixtures/summary.json");
+
+// SINGLE-DEVICE TARGETING — set these to send ONLY to your own phone instead of fanning out to every
+// registered device. MY_START_TOKEN = your push-to-start token (scopes the /test-activity START; every
+// update/end then follows only your Activity because it's keyed by this synthetic matchId). MY_DEVICE_TOKEN
+// = your APNs device token (scopes the V1 /test-push cards used by --correction). Pull both from Supabase:
+//   select t.token as start_token, d.token as device_token
+//   from live_activity_start_tokens t
+//   join device_tokens d on d.user_id = t.user_id and d.device_id = t.device_id
+//   where t.user_id = '<your uuid>';
+// Unset → original behavior (fan out to ALL devices). Tip: use a fresh --match-id per run so a prior
+// test's per-Activity token on another phone can't catch an update.
+const MY_START_TOKEN = process.env.MY_START_TOKEN ?? "";
+const MY_DEVICE_TOKEN = process.env.MY_DEVICE_TOKEN ?? "";
+const SINGLE_DEVICE = Boolean(MY_START_TOKEN || MY_DEVICE_TOKEN);
 
 // Scheduling constants.
 const END_HOLD_S = 12; //   keep the FT card visible before the end/dismiss push
@@ -75,15 +103,29 @@ const PINNED_EVENT = val("event", null);
 const TOTAL_MIN = Number(val("minutes", "10"));
 const TEAM = val("team", "WAS").toUpperCase();
 const MATCH_ID = val("match-id", "replay-test");
-// start → first update: time for devices to receive the start push, create the Activity, and upload the
-// per-Activity token. Push-to-start only uploads that token while the app is RUNNING to observe it, so
-// keep the app foregrounded on the test phone; 30s is comfortable. Raise with --start-hold for a slow link.
-const START_HOLD_S = Number(val("start-hold", "30"));
+// start → first update: time for the device to receive the start push, create the Activity, and upload
+// its per-Activity token. LEARNED 6/30 (do not re-discover): this takes MINUTES, not seconds — the exact
+// reason the watcher's LA_START_LEAD_MS is 20 min (a 1-min-before-kickoff start is too late for the token
+// to check in). The token uploads ONLY while the app is RUNNING to observe it, so keep it foregrounded.
+// 180s is the single-shot default; a too-short hold makes every update fire to 0 per-Activity tokens. The
+// RELIABLE path is two-phase: --start-only (app open) → confirm a live_activities row → --updates-only.
+const START_HOLD_S = Number(val("start-hold", "180"));
 // Two-phase helpers: --start-only fires just the start (register the per-Activity token, then stop);
 // --updates-only skips the start and drives kickoff→end against an ALREADY-running Activity.
 const START_ONLY = has("--start-only");
 const UPDATES_ONLY = has("--updates-only");
 const CORRECTION = has("--correction");
+// --with-v1: mirror each match moment with its V1 rich push too (lineup/kickoff/goal/HT/FT, card
+// image attached) — the full "every toggle on" experience: V1 banner buzzes, V2 card updates silently.
+// Also inserts a "Lineups in" V1 push 60s after the pre-start (mirrors the real Stage-D push).
+// Single-device scoping: set MY_DEVICE_TOKEN so the V1 pushes hit only your phone.
+const WITH_V1 = has("--with-v1");
+// --ht-hold=<sec>: dwell at halftime this long before the second half (default: the normal 10s gap).
+const HT_HOLD_S = Number(val("ht-hold", "0"));
+// --la-alerts (DEVICE TEST): put an audible alert on the V2 UPDATE/END pushes themselves (kickoff /
+// goals / HT / FT buzz via the Live Activity channel — no V1 involved). Tests whether V2-only could
+// carry the interrupts. Docs say yes; tonight's rule is verify on hardware.
+const LA_ALERTS = has("--la-alerts");
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -166,7 +208,7 @@ function buildTimeline(summary) {
 			else continue; // unknown team — skip rather than mis-score
 			const who = ev.participants?.[0]?.athlete?.displayName ?? "Goal";
 			const og = type.includes("own-goal") ? " (OG)" : "";
-			steps.push({ kind: "goal", label: `Goal ${ev.clock?.displayValue} ${who}${og}`, matchMin: min, phase: "live", hs, as, sc: `${who} ${ev.clock?.displayValue ?? `${min}'`}${og}` });
+			steps.push({ kind: "goal", label: `Goal ${ev.clock?.displayValue} ${who}${og}`, matchMin: min, phase: "live", hs, as, sc: `${who} ${ev.clock?.displayValue ?? `${min}'`}${og}`, scoringAbbr: tid === homeId ? h : a });
 		} else if (type.includes("kickoff")) {
 			steps.push({ kind: "kickoff", label: "Kickoff", matchMin: 1, phase: "live", hs, as });
 		} else if (type.includes("halftime")) {
@@ -216,7 +258,23 @@ function schedule(steps) {
 async function send(step, h, a) {
 	const mode = step.kind === "pre" ? "start" : step.kind === "end" ? "end" : "update";
 	const body = { mode, matchId: MATCH_ID, phase: step.phase, hs: step.hs, as: step.as };
-	if (mode === "start") Object.assign(body, { h, a, comp: "NWSL" });
+	// PROVEN 7/4: a start push WITHOUT an alert never renders (iOS silently drops it). The alert is
+	// REQUIRED for the card to appear; updates/end stay silent (they modify the existing Activity)
+	// unless --la-alerts puts an audible alert on the status changes (the V2-buzz device test).
+	if (mode === "start") Object.assign(body, { h, a, comp: "NWSL", alert: true });
+	if (LA_ALERTS && mode !== "start") {
+		const score = `${h} ${step.hs}–${step.as} ${a}`;
+		const alert =
+			step.kind === "kickoff" ? { title: `Kickoff — ${h} vs ${a}`, body: "We're underway.", sound: "default" }
+			: step.kind === "goal" ? { title: `GOAL — ${score}`, body: step.sc ?? "Goal.", sound: "default" }
+			: step.kind === "ht" ? { title: `Halftime — ${score}`, body: "It's the break.", sound: "default" }
+			: step.kind === "ft" || step.kind === "end" ? { title: `Full time — ${score}`, body: "That's the match.", sound: "default" }
+			: undefined; // 2nd-half resume stays silent
+		if (alert) body.alert = alert;
+	}
+	// Scope the START to one device (its push-to-start token). Updates/end omit token and target every
+	// per-Activity token for this matchId — only YOUR Activity exists for it, so they reach only you too.
+	if (mode === "start" && MY_START_TOKEN) body.token = MY_START_TOKEN;
 	if (step.matchMin > 0 && step.phase === "live") body.min = step.matchMin;
 	if (step.sc) body.sc = step.sc;
 
@@ -233,15 +291,48 @@ async function send(step, h, a) {
 }
 
 // ── VAR correction test (V1 push + V2 LA rollback) ─────────────────────────────
-const cardImageUrl = (params) => `${WATCHER_URL}/card/${MATCH_ID}?${new URLSearchParams(params).toString()}`;
 
-async function pushV1({ label, title, body, event, imageUrl }) {
+/** --with-v1: fire the V1 push matching a replay step (mirrors the watcher's real event pushes —
+ *  2026-07-05 redesign: title + subtitle only, square crest attachment; abbreviation copy per the
+ *  team-naming rule). Pre/2nd-half/dismiss have no V1 equivalent in a real game, so they're skipped. */
+async function sendV1ForStep(step, h, a) {
+	const score = `${h} ${step.hs}–${step.as} ${a}`;
+	// Crest per the production rule: goal → scoring club; FT → winner (draw → home); else home.
+	let crestAbbr = h;
+	let event, title, subtitle;
+	if (step.kind === "kickoff") {
+		event = "kickoff"; title = `Kickoff — ${h} vs ${a}`; subtitle = "The match is underway";
+	} else if (step.kind === "goal") {
+		event = "goal"; title = `GOAL — ${step.scoringAbbr ?? h}`; subtitle = step.sc ? `${score} · ${step.sc}` : score;
+		crestAbbr = step.scoringAbbr ?? h;
+	} else if (step.kind === "ht") {
+		event = "halftime"; title = "Halftime"; subtitle = score;
+	} else if (step.kind === "ft") {
+		event = "fulltime"; title = "Full time";
+		subtitle = step.hs === step.as ? `${score} · It's a draw` : `${score} · ${step.hs > step.as ? h : a} win`;
+		crestAbbr = step.hs > step.as ? h : step.as > step.hs ? a : h;
+	} else return;
+	await pushV1({ label: `${event} ${score}`, title, subtitle, event, imageUrl: `${CARD_URL}/thumb/${crestAbbr}?s=3` });
+}
+
+/** The "Lineups in" V1 push (--with-v1 inserts it 60s after the pre-start, like the real Stage-D push). */
+async function sendV1Lineup(h, a) {
+	await pushV1({
+		label: `lineup ${h} vs ${a}`,
+		title: `Lineups in — ${h} vs ${a}`,
+		subtitle: "Starting XIs are posted",
+		event: "lineup",
+		imageUrl: `${CARD_URL}/thumb/${h}?s=3`,
+	});
+}
+
+async function pushV1({ label, title, subtitle, body, event, imageUrl }) {
 	const res = await fetch(`${WATCHER_URL}/test-push`, {
 		method: "POST",
 		headers: { "content-type": "application/json", "x-trigger-secret": SECRET },
-		// no token → the watcher fans out to ALL registered device tokens; same eventID across the goal
-		// and the correction → both carry thread-id match-<MATCH_ID> → they stack on the lock screen.
-		body: JSON.stringify({ eventID: MATCH_ID, event, title, body, imageUrl }),
+		// token present → only your phone; omitted → fans out to ALL device tokens. Same eventID across the
+		// goal and the correction → both carry thread-id match-<MATCH_ID> → they stack on the lock screen.
+		body: JSON.stringify({ eventID: MATCH_ID, event, title, subtitle, body, imageUrl, ...(MY_DEVICE_TOKEN ? { token: MY_DEVICE_TOKEN } : {}) }),
 	});
 	const out = await res.json().catch(() => ({}));
 	const fails = (out.results ?? []).filter((r) => !r.ok).map((r) => `${r.status}:${r.reason ?? "?"}`);
@@ -285,13 +376,14 @@ async function runCorrection(summary) {
 		return;
 	}
 
-	console.log(`\n▶ Firing goal → correction (watch both phones)…\n`);
+	console.log(`\n▶ Firing goal → correction (watch your phone)…\n`);
+	// 2026-07-05 redesign: title+subtitle, square crest attachment (scoring club's crest).
 	const g = await pushV1({
 		label: `GOAL ${h} ${old.hs}–${old.as} ${a}`,
-		title: `GOAL — ${h} ${old.hs}–${old.as} ${a}`,
-		body: scorer ? `${scorer} scored.` : "Goal.",
+		title: `GOAL — ${lastGoal.scoringAbbr ?? h}`,
+		subtitle: scorer ? `${h} ${old.hs}–${old.as} ${a} · ${scorer} ${lastGoal.matchMin}'` : `${h} ${old.hs}–${old.as} ${a}`,
 		event: "goal",
-		imageUrl: cardImageUrl({ e: "goal", h, a, hs: old.hs, as: old.as, min: lastGoal.matchMin, sc: scorer }),
+		imageUrl: `${CARD_URL}/thumb/${lastGoal.scoringAbbr ?? h}?s=3`,
 	});
 	if (!g.httpOk) {
 		console.error(g.error ? `\n✗ Goal push errored: ${g.error}` : "\n✗ Goal push reached 0 devices — no registered V1 device tokens. Aborting.");
@@ -301,10 +393,10 @@ async function runCorrection(summary) {
 	await sleep(6000);
 	await pushV1({
 		label: `DISALLOWED ${h} ${corrected.hs}–${corrected.as} ${a}`,
-		title: "Goal Disallowed — VAR Review",
-		body: `${h} ${corrected.hs}–${corrected.as} ${a}`,
+		title: `NO GOAL — ${lastGoal.scoringAbbr ?? h}`,
+		subtitle: `${h} ${corrected.hs}–${corrected.as} ${a} · VAR review`,
 		event: "correction",
-		imageUrl: cardImageUrl({ e: "correction", h, a, hs: corrected.hs, as: corrected.as, oh: old.hs, oa: old.as }),
+		imageUrl: `${CARD_URL}/thumb/${lastGoal.scoringAbbr ?? h}?s=3`,
 	});
 
 	await sleep(2000);
@@ -315,7 +407,8 @@ async function runCorrection(summary) {
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
-	console.log(`\n🟢 Live Activity replay — ${DRY ? "DRY RUN" : "LIVE"}  (matchId=${MATCH_ID}, ~${TOTAL_MIN} min)\n`);
+	console.log(`\n🟢 Live Activity replay — ${DRY ? "DRY RUN" : "LIVE"}  (matchId=${MATCH_ID}, ~${TOTAL_MIN} min)`);
+	console.log(SINGLE_DEVICE ? `🎯 Single-device mode — sending ONLY to your phone (start${MY_DEVICE_TOKEN ? " + V1" : ""} token set).\n` : `📡 Fan-out mode — sending to ALL registered devices.\n`);
 	if (!DRY && !SECRET) {
 		console.error("✗ MANUAL_TRIGGER_SECRET not set. Run with the watcher's trigger secret, or use --dry-run.");
 		process.exit(1);
@@ -333,22 +426,48 @@ async function main() {
 	else if (UPDATES_ONLY) steps = steps.filter((s) => s.kind !== "pre");
 	schedule(steps);
 
-	console.log(`\n▶ Schedule (${steps.length} steps, ${h} home / ${a} away, event ${eventId}):`);
-	for (const s of steps) console.log(`  [${fmtClock(s.offsetSec)}] ${s.label.padEnd(34)} ${s.phase.padEnd(9)} ${s.hs}-${s.as}${s.sc ? "  · " + s.sc : ""}`);
+	// --with-v1: the "Lineups in" V1 moment, 60s after the pre-start (pre-kickoff, like the real push).
+	if (WITH_V1 && !START_ONLY && !UPDATES_ONLY) {
+		steps.splice(1, 0, { kind: "lineup", label: "Lineups posted (V1)", phase: "pre", hs: 0, as: 0, matchMin: -1, offsetSec: 60 });
+	}
+	// --ht-hold: dwell at halftime before the second half; everything after shifts by the same delta.
+	const hi = steps.findIndex((s) => s.kind === "ht");
+	if (HT_HOLD_S > 0 && hi >= 0 && hi + 1 < steps.length) {
+		const delta = steps[hi].offsetSec + HT_HOLD_S - steps[hi + 1].offsetSec;
+		if (delta > 0) for (let j = hi + 1; j < steps.length; j++) steps[j].offsetSec += delta;
+	}
+
+	// Live run: DON'T dump the whole schedule up front (it reads like the replay already happened in
+	// one shot). Print only a one-line summary; each step's line then appears LIVE as it actually fires,
+	// paced across the wall-clock window. The full per-step schedule prints only in --dry-run (a preview).
+	const lastOff = steps.length ? steps[steps.length - 1].offsetSec : 0;
+	if (DRY) {
+		console.log(`\n▶ Schedule (${steps.length} steps, ${h} home / ${a} away, event ${eventId}):`);
+		for (const s of steps) console.log(`  [${fmtClock(s.offsetSec)}] ${s.label.padEnd(34)} ${s.phase.padEnd(9)} ${s.hs}-${s.as}${s.sc ? "  · " + s.sc : ""}`);
+	} else {
+		console.log(`\n▶ ${steps.length} steps, ${h} ${DRY ? "" : "home"} vs ${a}, event ${eventId} — playing out live over ~${fmtClock(lastOff)} (lines appear as each event fires).`);
+	}
 
 	if (DRY) {
 		console.log("\n(dry run — nothing sent)\n");
 		return;
 	}
 
-	console.log(`\n▶ Driving the lifecycle (watch both phones)…\n`);
+	console.log(`\n▶ Driving the lifecycle (watch your phone)…\n`);
 	let t0 = Date.now();
 	let warnedNoActivity = false;
 	for (let i = 0; i < steps.length; i++) {
 		const step = steps[i];
 		const wait = step.offsetSec * 1000 - (Date.now() - t0);
 		if (wait > 0) await sleep(wait);
+		if (step.kind === "lineup") {
+			// V1-only moment — no V2 state change pre-kickoff.
+			console.log(`  [${fmtClock(step.offsetSec)}] v1     ${step.label}`);
+			await sendV1Lineup(h, a);
+			continue;
+		}
 		const r = await send(step, h, a);
+		if (WITH_V1) await sendV1ForStep(step, h, a); // mirror the moment as a V1 rich push too
 
 		if (step.kind === "pre" && !r.httpOk) {
 			if (r.error) console.error(`\n✗ Start fan-out errored server-side. Aborting.\n   ${r.error}`);
