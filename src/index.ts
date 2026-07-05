@@ -660,6 +660,9 @@ async function handleTestActivity(request: Request, env: Env): Promise<Response>
 		min?: number;
 		sc?: string;
 		comp?: string;
+		/** DIAGNOSTIC: `alert: true` (or {title,body}) adds an alert to a START push — A/B test for
+		 *  whether the silent start presents on current iOS. Test-only; the cron never sets this. */
+		alert?: boolean | { title: string; body: string };
 	};
 	try {
 		p = (await request.json()) as typeof p;
@@ -714,10 +717,18 @@ async function handleTestActivity(request: Request, env: Env): Promise<Response>
 		);
 	}
 
+	// Diagnostic alert for START pushes (see the `alert` field doc above). `true` → a generic pair.
+	const startAlert =
+		p.alert === true
+			? { title: `${p.h ?? "ORL"} vs ${p.a ?? "POR"}`, body: "Match card is live on your lock screen." }
+			: p.alert && typeof p.alert === "object"
+				? p.alert
+				: undefined;
+
 	const send = (token: string) => {
 		if (mode === "start") {
 			const attrs = attributesFor(matchId, p.h ?? "ORL", p.a ?? "POR", p.comp ?? "NWSL");
-			return startLiveActivity(token, attrs, state, jwt, apns);
+			return startLiveActivity(token, attrs, state, jwt, apns, undefined, startAlert);
 		}
 		if (mode === "end") return endLiveActivity(token, state, jwt, apns, nowSec + LA_DISMISS_AFTER_S);
 		return updateLiveActivity(token, state, jwt, apns);

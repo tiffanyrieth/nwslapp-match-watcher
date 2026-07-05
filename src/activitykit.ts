@@ -93,6 +93,12 @@ export async function startLiveActivity(
 	jwt: string,
 	cfg: ApnsConfig,
 	staleSeconds = 8 * 3600,
+	// DIAGNOSTIC-ONLY (2026-07-04): optional alert so /test-activity can A/B whether the SILENT
+	// start actually presents on current iOS. The 7/1 device finding was "no alert → APNs 200s but
+	// iOS never renders the card"; the alert was later removed per Apple docs ("optional") and the
+	// silent variant was never device-verified (the token bug masked every no-show since). The cron
+	// path passes nothing here, so real-match behavior is unchanged.
+	alert?: { title: string; body: string },
 ): Promise<ApnsResult> {
 	const now = Math.floor(Date.now() / 1000);
 	const aps = compact({
@@ -103,6 +109,7 @@ export async function startLiveActivity(
 		"content-state": compact(state),
 		"stale-date": now + staleSeconds,
 		"relevance-score": 100,
+		...(alert ? { alert } : {}),
 	});
 	return postLiveActivity(pushToStartToken, aps, jwt, cfg, "10");
 }
