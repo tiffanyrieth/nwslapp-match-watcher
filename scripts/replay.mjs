@@ -112,10 +112,13 @@ const START_HOLD_S = Number(val("start-hold", "180"));
 const START_ONLY = has("--start-only");
 const UPDATES_ONLY = has("--updates-only");
 const CORRECTION = has("--correction");
-// --with-v1: mirror each match moment with its V1 rich push too (kickoff/goal/HT/FT, card image
-// attached) — the full "every toggle on" experience: V1 banner buzzes, V2 card updates silently.
+// --with-v1: mirror each match moment with its V1 rich push too (lineup/kickoff/goal/HT/FT, card
+// image attached) — the full "every toggle on" experience: V1 banner buzzes, V2 card updates silently.
+// Also inserts a "Lineups in" V1 push 60s after the pre-start (mirrors the real Stage-D push).
 // Single-device scoping: set MY_DEVICE_TOKEN so the V1 pushes hit only your phone.
 const WITH_V1 = has("--with-v1");
+// --ht-hold=<sec>: dwell at halftime this long before the second half (default: the normal 10s gap).
+const HT_HOLD_S = Number(val("ht-hold", "0"));
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -295,6 +298,17 @@ async function sendV1ForStep(step, h, a) {
 	await pushV1({ label: `${event} ${score}`, title, body, event, imageUrl: cardImageUrl(params) });
 }
 
+/** The "Lineups in" V1 push (--with-v1 inserts it 60s after the pre-start, like the real Stage-D push). */
+async function sendV1Lineup(h, a) {
+	await pushV1({
+		label: `lineup ${h} vs ${a}`,
+		title: `Lineups in — ${h} vs ${a}`,
+		body: "Starting XIs are posted.",
+		event: "lineup",
+		imageUrl: cardImageUrl({ e: "lineup", h, a, hs: 0, as: 0 }),
+	});
+}
+
 async function pushV1({ label, title, body, event, imageUrl }) {
 	const res = await fetch(`${WATCHER_URL}/test-push`, {
 		method: "POST",
@@ -394,6 +408,17 @@ async function main() {
 	else if (UPDATES_ONLY) steps = steps.filter((s) => s.kind !== "pre");
 	schedule(steps);
 
+	// --with-v1: the "Lineups in" V1 moment, 60s after the pre-start (pre-kickoff, like the real push).
+	if (WITH_V1 && !START_ONLY && !UPDATES_ONLY) {
+		steps.splice(1, 0, { kind: "lineup", label: "Lineups posted (V1)", phase: "pre", hs: 0, as: 0, matchMin: -1, offsetSec: 60 });
+	}
+	// --ht-hold: dwell at halftime before the second half; everything after shifts by the same delta.
+	const hi = steps.findIndex((s) => s.kind === "ht");
+	if (HT_HOLD_S > 0 && hi >= 0 && hi + 1 < steps.length) {
+		const delta = steps[hi].offsetSec + HT_HOLD_S - steps[hi + 1].offsetSec;
+		if (delta > 0) for (let j = hi + 1; j < steps.length; j++) steps[j].offsetSec += delta;
+	}
+
 	// Live run: DON'T dump the whole schedule up front (it reads like the replay already happened in
 	// one shot). Print only a one-line summary; each step's line then appears LIVE as it actually fires,
 	// paced across the wall-clock window. The full per-step schedule prints only in --dry-run (a preview).
@@ -417,6 +442,12 @@ async function main() {
 		const step = steps[i];
 		const wait = step.offsetSec * 1000 - (Date.now() - t0);
 		if (wait > 0) await sleep(wait);
+		if (step.kind === "lineup") {
+			// V1-only moment — no V2 state change pre-kickoff.
+			console.log(`  [${fmtClock(step.offsetSec)}] v1     ${step.label}`);
+			await sendV1Lineup(h, a);
+			continue;
+		}
 		const r = await send(step, h, a);
 		if (WITH_V1) await sendV1ForStep(step, h, a); // mirror the moment as a V1 rich push too
 
