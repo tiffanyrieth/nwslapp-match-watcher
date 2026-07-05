@@ -36,6 +36,9 @@
  *   ... --with-v1            ALSO fire the matching V1 rich push at each moment (kickoff/goal/HT/FT,
  *                            card image attached) — the full "every toggle on" experience. Set
  *                            MY_DEVICE_TOKEN to scope the V1 pushes to one phone.
+ *   ... --la-alerts          DEVICE TEST: audible alerts ON THE V2 UPDATE/END pushes themselves
+ *                            (kickoff/goals/HT/FT buzz via the Live Activity channel, no V1).
+ *   ... --ht-hold=<sec>      dwell at halftime this long before the second half.
  *
  * NOTE (6/30 findings — the two traps that waste a whole session if forgotten):
  *   1. The per-Activity update token takes MINUTES to check in after the start (device must receive the
@@ -119,6 +122,10 @@ const CORRECTION = has("--correction");
 const WITH_V1 = has("--with-v1");
 // --ht-hold=<sec>: dwell at halftime this long before the second half (default: the normal 10s gap).
 const HT_HOLD_S = Number(val("ht-hold", "0"));
+// --la-alerts (DEVICE TEST): put an audible alert on the V2 UPDATE/END pushes themselves (kickoff /
+// goals / HT / FT buzz via the Live Activity channel — no V1 involved). Tests whether V2-only could
+// carry the interrupts. Docs say yes; tonight's rule is verify on hardware.
+const LA_ALERTS = has("--la-alerts");
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -252,8 +259,19 @@ async function send(step, h, a) {
 	const mode = step.kind === "pre" ? "start" : step.kind === "end" ? "end" : "update";
 	const body = { mode, matchId: MATCH_ID, phase: step.phase, hs: step.hs, as: step.as };
 	// PROVEN 7/4: a start push WITHOUT an alert never renders (iOS silently drops it). The alert is
-	// REQUIRED for the card to appear; updates/end stay silent (they modify the existing Activity).
+	// REQUIRED for the card to appear; updates/end stay silent (they modify the existing Activity)
+	// unless --la-alerts puts an audible alert on the status changes (the V2-buzz device test).
 	if (mode === "start") Object.assign(body, { h, a, comp: "NWSL", alert: true });
+	if (LA_ALERTS && mode !== "start") {
+		const score = `${h} ${step.hs}–${step.as} ${a}`;
+		const alert =
+			step.kind === "kickoff" ? { title: `Kickoff — ${h} vs ${a}`, body: "We're underway.", sound: "default" }
+			: step.kind === "goal" ? { title: `GOAL — ${score}`, body: step.sc ?? "Goal.", sound: "default" }
+			: step.kind === "ht" ? { title: `Halftime — ${score}`, body: "It's the break.", sound: "default" }
+			: step.kind === "ft" || step.kind === "end" ? { title: `Full time — ${score}`, body: "That's the match.", sound: "default" }
+			: undefined; // 2nd-half resume stays silent
+		if (alert) body.alert = alert;
+	}
 	// Scope the START to one device (its push-to-start token). Updates/end omit token and target every
 	// per-Activity token for this matchId — only YOUR Activity exists for it, so they reach only you too.
 	if (mode === "start" && MY_START_TOKEN) body.token = MY_START_TOKEN;

@@ -115,13 +115,16 @@ export async function startLiveActivity(
 	return postLiveActivity(pushToStartToken, aps, jwt, cfg, "10");
 }
 
-/** UPDATE a running Activity (per-Activity token). Silent — no `alert`, so the phone never buzzes. */
+/** UPDATE a running Activity (per-Activity token). Silent by default — no `alert`, no buzz.
+ *  `opts.alert` (DEVICE-TEST ONLY, 2026-07-05): Apple docs support an alert on updates (sound +
+ *  lit screen + expanded Dynamic Island pop). Plumbed for /test-activity + replay --la-alerts to
+ *  verify on hardware; the CRON passes no alert — a design decision gates any real use. */
 export async function updateLiveActivity(
 	activityToken: string,
 	state: LiveContentState,
 	jwt: string,
 	cfg: ApnsConfig,
-	opts: { staleSeconds?: number; priority?: string } = {},
+	opts: { staleSeconds?: number; priority?: string; alert?: { title: string; body: string; sound?: string } } = {},
 ): Promise<ApnsResult> {
 	const now = Math.floor(Date.now() / 1000);
 	const aps = compact({
@@ -129,17 +132,20 @@ export async function updateLiveActivity(
 		event: "update",
 		"content-state": compact(state),
 		"stale-date": now + (opts.staleSeconds ?? 3600),
+		...(opts.alert ? { alert: opts.alert } : {}),
 	});
 	return postLiveActivity(activityToken, aps, jwt, cfg, opts.priority ?? "10");
 }
 
-/** END a running Activity. `dismissEpoch` keeps the final card on the lock screen until then (FT+~15m). */
+/** END a running Activity. `dismissEpoch` keeps the final card on the lock screen until then (FT+~15m).
+ *  `alert` — same DEVICE-TEST ONLY knob as updateLiveActivity (an audible FT alert experiment). */
 export async function endLiveActivity(
 	activityToken: string,
 	finalState: LiveContentState,
 	jwt: string,
 	cfg: ApnsConfig,
 	dismissEpoch: number,
+	alert?: { title: string; body: string; sound?: string },
 ): Promise<ApnsResult> {
 	const now = Math.floor(Date.now() / 1000);
 	const aps = compact({
@@ -147,6 +153,7 @@ export async function endLiveActivity(
 		event: "end",
 		"content-state": compact(finalState),
 		"dismissal-date": dismissEpoch,
+		...(alert ? { alert } : {}),
 	});
 	return postLiveActivity(activityToken, aps, jwt, cfg, "10");
 }

@@ -728,8 +728,10 @@ async function handleTestActivity(request: Request, env: Env): Promise<Response>
 		);
 	}
 
-	// Diagnostic alert for START pushes (see the `alert` field doc above). `true` → a generic pair.
-	const startAlert =
+	// Diagnostic alert (see the `alert` field doc above), applied to ANY mode — start renders the
+	// card (REQUIRED there), update/end A/B the "V2 buzzes on status changes" capability. `true` → a
+	// generic pair.
+	const testAlert =
 		p.alert === true
 			? { title: `${p.h ?? "ORL"} vs ${p.a ?? "POR"}`, body: "Match card is live on your lock screen." }
 			: p.alert && typeof p.alert === "object"
@@ -739,10 +741,10 @@ async function handleTestActivity(request: Request, env: Env): Promise<Response>
 	const send = (token: string) => {
 		if (mode === "start") {
 			const attrs = attributesFor(matchId, p.h ?? "ORL", p.a ?? "POR", p.comp ?? "NWSL");
-			return startLiveActivity(token, attrs, state, jwt, apns, undefined, startAlert);
+			return startLiveActivity(token, attrs, state, jwt, apns, undefined, testAlert);
 		}
-		if (mode === "end") return endLiveActivity(token, state, jwt, apns, nowSec + LA_DISMISS_AFTER_S);
-		return updateLiveActivity(token, state, jwt, apns);
+		if (mode === "end") return endLiveActivity(token, state, jwt, apns, nowSec + LA_DISMISS_AFTER_S, testAlert);
+		return updateLiveActivity(token, state, jwt, apns, { alert: testAlert });
 	};
 	const results = await Promise.all(tokens.map(send));
 	const okCount = results.filter((r) => r.ok).length;
