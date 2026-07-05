@@ -34,9 +34,15 @@
  *                            correction push (red card, struck score, stacks via thread-id) + a silent
  *                            V2 Live Activity score rollback. Mirrors the brief's goal-then-correction.
  *
- * NOTE: a push-started Activity uploads its per-Activity update token to Supabase only while the app is
- * RUNNING to observe it. Keep the test phone's app OPEN around the start, or use --start-only (open app,
- * confirm a live_activities row) then --updates-only to drive the rest.
+ * NOTE (6/30 findings — the two traps that waste a whole session if forgotten):
+ *   1. The per-Activity update token takes MINUTES to check in after the start (device must receive the
+ *      push, create the Activity, upload the token — and ONLY while the app is RUNNING to observe it).
+ *      This is why LA_START_LEAD_MS is 20 min. A short --start-hold → every update hits 0 tokens.
+ *   2. `start → 1/1 ok` means APNs ACCEPTED the push-to-start — NOT that the card rendered or the token
+ *      checked in. Those are separate; verify the card on-screen and a live_activities row separately.
+ *   RELIABLE recipe: --start-only (app OPEN + foregrounded) → wait, confirm a live_activities row for the
+ *   matchId → --updates-only. Don't gamble on a fixed inline hold.
+ *   (The compressed clock "jumping" between real minutes is EXPECTED, not a bug.)
  *
  * ENV: MANUAL_TRIGGER_SECRET (required unless --dry-run), WATCHER_URL, PROXY_URL (sensible defaults below).
  */
@@ -91,10 +97,13 @@ const PINNED_EVENT = val("event", null);
 const TOTAL_MIN = Number(val("minutes", "10"));
 const TEAM = val("team", "WAS").toUpperCase();
 const MATCH_ID = val("match-id", "replay-test");
-// start → first update: time for devices to receive the start push, create the Activity, and upload the
-// per-Activity token. Push-to-start only uploads that token while the app is RUNNING to observe it, so
-// keep the app foregrounded on the test phone; 30s is comfortable. Raise with --start-hold for a slow link.
-const START_HOLD_S = Number(val("start-hold", "30"));
+// start → first update: time for the device to receive the start push, create the Activity, and upload
+// its per-Activity token. LEARNED 6/30 (do not re-discover): this takes MINUTES, not seconds — the exact
+// reason the watcher's LA_START_LEAD_MS is 20 min (a 1-min-before-kickoff start is too late for the token
+// to check in). The token uploads ONLY while the app is RUNNING to observe it, so keep it foregrounded.
+// 180s is the single-shot default; a too-short hold makes every update fire to 0 per-Activity tokens. The
+// RELIABLE path is two-phase: --start-only (app open) → confirm a live_activities row → --updates-only.
+const START_HOLD_S = Number(val("start-hold", "180"));
 // Two-phase helpers: --start-only fires just the start (register the per-Activity token, then stop);
 // --updates-only skips the start and drives kickoff→end against an ALREADY-running Activity.
 const START_ONLY = has("--start-only");
