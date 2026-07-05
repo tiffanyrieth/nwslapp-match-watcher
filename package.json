@@ -4,7 +4,9 @@
 	"private": true,
 	"scripts": {
 		"deploy": "wrangler deploy",
+		"deploy:card": "wrangler deploy -c wrangler.card.jsonc",
 		"dev": "wrangler dev",
+		"dev:card": "wrangler dev -c wrangler.card.jsonc",
 		"start": "wrangler dev",
 		"test": "vitest",
 		"typecheck": "tsc --noEmit",
