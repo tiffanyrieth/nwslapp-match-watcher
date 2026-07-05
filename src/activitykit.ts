@@ -137,14 +137,17 @@ export async function updateLiveActivity(
 	return postLiveActivity(activityToken, aps, jwt, cfg, opts.priority ?? "10");
 }
 
-/** END a running Activity. `dismissEpoch` keeps the final card on the lock screen until then (FT+~15m).
- *  `alert` — same DEVICE-TEST ONLY knob as updateLiveActivity (an audible FT alert experiment). */
+/** END a running Activity. `dismissEpoch` OMITTED → system default: the final card lingers on the
+ *  lock screen up to Apple's ~4h cap (dates further out are ignored), user-dismissable anytime —
+ *  the real cron's behavior (owner request 2026-07-05). Tests pass a short epoch so their cards
+ *  self-clean. `alert` — same DEVICE-TEST ONLY knob as updateLiveActivity (end alerts appear to be
+ *  IGNORED by iOS per the 7/5 device test — kept for re-testing on future iOS versions). */
 export async function endLiveActivity(
 	activityToken: string,
 	finalState: LiveContentState,
 	jwt: string,
 	cfg: ApnsConfig,
-	dismissEpoch: number,
+	dismissEpoch?: number,
 	alert?: { title: string; body: string; sound?: string },
 ): Promise<ApnsResult> {
 	const now = Math.floor(Date.now() / 1000);

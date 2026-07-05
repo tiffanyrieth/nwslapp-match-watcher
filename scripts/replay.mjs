@@ -61,8 +61,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const WATCHER_URL = (process.env.WATCHER_URL ?? "https://nwslapp-match-watcher.tiffany-rieth.workers.dev").replace(/\/$/, "");
-// The card renderer moved to the nwslapp-card worker (see wrangler.card.jsonc); imageUrls point there.
-const CARD_URL = (process.env.CARD_URL ?? "https://nwslapp-card.tiffany-rieth.workers.dev").replace(/\/$/, "");
 const PROXY_URL = (process.env.PROXY_URL ?? "https://nwslapp-proxy.tiffany-rieth.workers.dev").replace(/\/$/, "");
 const SECRET = process.env.MANUAL_TRIGGER_SECRET ?? process.env.TRIGGER_SECRET ?? "";
 const FIXTURE_PATH = resolve(__dirname, "../../NWSLApp/NWSLAppTests/Fixtures/summary.json");
@@ -208,7 +206,7 @@ function buildTimeline(summary) {
 			else continue; // unknown team — skip rather than mis-score
 			const who = ev.participants?.[0]?.athlete?.displayName ?? "Goal";
 			const og = type.includes("own-goal") ? " (OG)" : "";
-			steps.push({ kind: "goal", label: `Goal ${ev.clock?.displayValue} ${who}${og}`, matchMin: min, phase: "live", hs, as, sc: `${who} ${ev.clock?.displayValue ?? `${min}'`}${og}` });
+			steps.push({ kind: "goal", label: `Goal ${ev.clock?.displayValue} ${who}${og}`, matchMin: min, phase: "live", hs, as, sc: `${who} ${ev.clock?.displayValue ?? `${min}'`}${og}`, scoringAbbr: tid === homeId ? h : a });
 		} else if (type.includes("kickoff")) {
 			steps.push({ kind: "kickoff", label: "Kickoff", matchMin: 1, phase: "live", hs, as });
 		} else if (type.includes("halftime")) {
@@ -291,49 +289,48 @@ async function send(step, h, a) {
 }
 
 // ── VAR correction test (V1 push + V2 LA rollback) ─────────────────────────────
-const cardImageUrl = (params) => `${CARD_URL}/card/${MATCH_ID}?${new URLSearchParams(params).toString()}`;
 
-/** --with-v1: fire the V1 rich push matching a replay step (mirrors the watcher's real event pushes —
- *  abbreviation copy per the team-naming rule, card image attached). Pre/2nd-half/dismiss have no V1
- *  equivalent in a real game, so they're skipped. */
+/** --with-v1: fire the V1 push matching a replay step (mirrors the watcher's real event pushes —
+ *  2026-07-05 redesign: title + subtitle only, square crest attachment; abbreviation copy per the
+ *  team-naming rule). Pre/2nd-half/dismiss have no V1 equivalent in a real game, so they're skipped. */
 async function sendV1ForStep(step, h, a) {
 	const score = `${h} ${step.hs}–${step.as} ${a}`;
-	let event, title, body;
+	// Crest per the production rule: goal → scoring club; FT → winner (draw → home); else home.
+	let crestAbbr = h;
+	let event, title, subtitle;
 	if (step.kind === "kickoff") {
-		event = "kickoff"; title = `Kickoff — ${h} vs ${a}`; body = "We're underway.";
+		event = "kickoff"; title = `Kickoff: ${h} vs ${a}`; subtitle = "The match is underway";
 	} else if (step.kind === "goal") {
-		event = "goal"; title = `GOAL — ${score}`; body = step.sc ?? "Goal.";
+		event = "goal"; title = `GOAL: ${score}`; subtitle = step.sc ?? "Goal";
+		crestAbbr = step.scoringAbbr ?? h;
 	} else if (step.kind === "ht") {
-		event = "halftime"; title = `Halftime — ${score}`; body = "Second half coming up.";
+		event = "halftime"; title = `Halftime: ${score}`; subtitle = "It's the break";
 	} else if (step.kind === "ft") {
-		event = "fulltime"; title = `Full-time — ${score}`; body = "That's the match.";
+		event = "fulltime"; title = `Full time: ${score}`;
+		subtitle = step.hs === step.as ? "It's a draw" : "Winners take the points";
+		crestAbbr = step.hs > step.as ? h : step.as > step.hs ? a : h;
 	} else return;
-	const params = { e: event, h, a, hs: step.hs, as: step.as };
-	if (step.kind === "goal") {
-		if (step.matchMin > 0) params.min = step.matchMin;
-		if (step.sc) params.sc = step.sc.replace(/\s+\d+'.*$/, "").trim(); // scorer name w/o the minute suffix
-	}
-	await pushV1({ label: `${event} ${score}`, title, body, event, imageUrl: cardImageUrl(params) });
+	await pushV1({ label: `${event} ${score}`, title, subtitle, event, imageUrl: `${PROXY_URL}/crest/${crestAbbr}` });
 }
 
 /** The "Lineups in" V1 push (--with-v1 inserts it 60s after the pre-start, like the real Stage-D push). */
 async function sendV1Lineup(h, a) {
 	await pushV1({
 		label: `lineup ${h} vs ${a}`,
-		title: `Lineups in — ${h} vs ${a}`,
-		body: "Starting XIs are posted.",
+		title: `Lineups in: ${h} vs ${a}`,
+		subtitle: "Starting XIs are posted",
 		event: "lineup",
-		imageUrl: cardImageUrl({ e: "lineup", h, a, hs: 0, as: 0 }),
+		imageUrl: `${PROXY_URL}/crest/${h}`,
 	});
 }
 
-async function pushV1({ label, title, body, event, imageUrl }) {
+async function pushV1({ label, title, subtitle, body, event, imageUrl }) {
 	const res = await fetch(`${WATCHER_URL}/test-push`, {
 		method: "POST",
 		headers: { "content-type": "application/json", "x-trigger-secret": SECRET },
 		// token present → only your phone; omitted → fans out to ALL device tokens. Same eventID across the
 		// goal and the correction → both carry thread-id match-<MATCH_ID> → they stack on the lock screen.
-		body: JSON.stringify({ eventID: MATCH_ID, event, title, body, imageUrl, ...(MY_DEVICE_TOKEN ? { token: MY_DEVICE_TOKEN } : {}) }),
+		body: JSON.stringify({ eventID: MATCH_ID, event, title, subtitle, body, imageUrl, ...(MY_DEVICE_TOKEN ? { token: MY_DEVICE_TOKEN } : {}) }),
 	});
 	const out = await res.json().catch(() => ({}));
 	const fails = (out.results ?? []).filter((r) => !r.ok).map((r) => `${r.status}:${r.reason ?? "?"}`);
@@ -378,12 +375,13 @@ async function runCorrection(summary) {
 	}
 
 	console.log(`\n▶ Firing goal → correction (watch your phone)…\n`);
+	// 2026-07-05 redesign: title+subtitle, square crest attachment (scoring club's crest).
 	const g = await pushV1({
 		label: `GOAL ${h} ${old.hs}–${old.as} ${a}`,
-		title: `GOAL — ${h} ${old.hs}–${old.as} ${a}`,
-		body: scorer ? `${scorer} scored.` : "Goal.",
+		title: `GOAL: ${h} ${old.hs}–${old.as} ${a}`,
+		subtitle: scorer ? `${scorer} ${lastGoal.matchMin}'` : "Goal",
 		event: "goal",
-		imageUrl: cardImageUrl({ e: "goal", h, a, hs: old.hs, as: old.as, min: lastGoal.matchMin, sc: scorer }),
+		imageUrl: `${PROXY_URL}/crest/${lastGoal.scoringAbbr ?? h}`,
 	});
 	if (!g.httpOk) {
 		console.error(g.error ? `\n✗ Goal push errored: ${g.error}` : "\n✗ Goal push reached 0 devices — no registered V1 device tokens. Aborting.");
@@ -393,10 +391,10 @@ async function runCorrection(summary) {
 	await sleep(6000);
 	await pushV1({
 		label: `DISALLOWED ${h} ${corrected.hs}–${corrected.as} ${a}`,
-		title: "Goal Disallowed — VAR Review",
-		body: `${h} ${corrected.hs}–${corrected.as} ${a}`,
+		title: `NO GOAL: ${h} ${corrected.hs}–${corrected.as} ${a}`,
+		subtitle: "VAR review — goal disallowed",
 		event: "correction",
-		imageUrl: cardImageUrl({ e: "correction", h, a, hs: corrected.hs, as: corrected.as, oh: old.hs, oa: old.as }),
+		imageUrl: `${PROXY_URL}/crest/${lastGoal.scoringAbbr ?? h}`,
 	});
 
 	await sleep(2000);

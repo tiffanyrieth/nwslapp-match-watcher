@@ -63,8 +63,12 @@ export interface Env {
 	/** APNs host — api.sandbox.push.apple.com (dev) or api.push.apple.com (TestFlight). */
 	APNS_HOST: string;
 
-	/** The sibling `nwslapp-card` worker's origin (where GET /card lives) — goes in `imageUrl`. */
+	/** The sibling `nwslapp-card` worker's origin — the /card 302 shim target (late-delivered pushes). */
 	CARD_PUBLIC_URL: string;
+
+	/** The proxy's PUBLIC origin — V1 pushes attach its /crest/{ABBR} PNG (the NSE downloads over
+	 *  the public internet, so the PROXY service binding doesn't apply here). */
+	PROXY_PUBLIC_URL: string;
 
 	/** Service binding to the sibling proxy (its /scoreboard + /crest routes). A binding,
 	 *  not a workers.dev fetch: same-account Worker→Worker over the public URL fails with
@@ -116,7 +120,7 @@ const LA_START_LEAD_MS = 20 * 60 * 1000; // remote-start the Activity ≤20 min 
 // registration window (a device can take minutes to observe the Activity + upload its per-Activity token;
 // ≤5 min bled past kickoff and missed early goals). Doubles as the pre-match "SOON" glance card.
 const LA_RESYNC_MS = 10 * 60 * 1000; // clock-drift resync cadence (the widget's local timer ticks between)
-const LA_DISMISS_AFTER_S = 15 * 60; // keep the FT card on the lock screen ~15 min, then dismiss
+const LA_DISMISS_AFTER_S = 15 * 60; // TEST-ONLY (/test-activity end): quick self-clean for test cards. The real cron omits dismissal-date → FT card lingers up to Apple's ~4h cap, user-dismissable.
 
 function apnsConfig(env: Env): ApnsConfig {
 	return {
@@ -257,7 +261,7 @@ async function runWatch(env: Env): Promise<void> {
 			if (tokens.length === 0) return;
 
 			jwt ??= await apnsJwt(apns);
-			const payload = toPayload(ev, env.CARD_PUBLIC_URL);
+			const payload = toPayload(ev, env.PROXY_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 			console.log(`[watcher] ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 			await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -342,7 +346,7 @@ async function runWatch(env: Env): Promise<void> {
 				}
 				if (tokens.length === 0) continue;
 				jwt ??= await apnsJwt(apns);
-				const payload = toPayload(ev, env.CARD_PUBLIC_URL);
+				const payload = toPayload(ev, env.PROXY_PUBLIC_URL);
 				const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 				console.log(`[watcher] NT ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 				await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -389,8 +393,10 @@ async function syncLiveActivity(
 	const state: LiveContentState = contentStateFromMatch(match);
 
 	if (ended) {
-		const dismissAt = Math.floor(Date.now() / 1000) + LA_DISMISS_AFTER_S;
-		const endResults = await Promise.all(tokens.map((t) => endLiveActivity(t, state, jwt, apns, dismissAt)));
+		// No dismissal-date → system default: the FT card lingers on the lock screen up to Apple's
+		// ~4h cap (dates further out are ignored), dismissable by the user anytime (owner request,
+		// 2026-07-05). The 15-min quick dismiss lives on only in /test-activity (test cards self-clean).
+		const endResults = await Promise.all(tokens.map((t) => endLiveActivity(t, state, jwt, apns)));
 		await pruneDeadTokens(sb, "live_activities", "push_token", endResults);
 		await env.MATCH_STATE.delete(rsKey);
 		await env.MATCH_STATE.delete(seenKey);
@@ -510,8 +516,8 @@ async function checkUpcomingLineups(
 			eventId: info.matchId,
 			teamIds: [info.homeId, info.awayId],
 			prefColumn: "lineup_posted",
-			title: `Lineups in — ${info.homeAbbr} vs ${info.awayAbbr}`,
-			body: "Starting XIs are posted — see who's playing.",
+			title: `Lineups in: ${info.homeAbbr} vs ${info.awayAbbr}`,
+			subtitle: "Starting XIs are posted",
 			homeAbbr: info.homeAbbr,
 			awayAbbr: info.awayAbbr,
 			homeScore: 0,
@@ -527,7 +533,7 @@ async function checkUpcomingLineups(
 		}
 		if (tokens.length > 0) {
 			const jwt = await apnsJwt(apns);
-			const payload = toPayload(lineupEvent, env.CARD_PUBLIC_URL);
+			const payload = toPayload(lineupEvent, env.PROXY_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt, apns)));
 			console.log(`[watcher] lineup ${info.homeAbbr} vs ${info.awayAbbr}: ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 			await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -572,7 +578,6 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 		eventID?: string;
 		event?: string;
 		imageUrl?: string;
-		thumbnailRect?: number[];
 	};
 	try {
 		payload = (await request.json()) as typeof payload;
@@ -583,20 +588,14 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	const jwt = await apnsJwt(apns);
 	const eventID = payload.eventID ?? "401853925";
 	const event = payload.event ?? "goal";
-	// Default to a real-looking goal card on this worker if the caller didn't pass one.
-	const imageUrl =
-		payload.imageUrl ??
-		`${env.CARD_PUBLIC_URL.replace(/\/$/, "")}/card/${eventID}?e=${event}&h=WAS&a=ORL&hs=1&as=0&min=67&sc=${encodeURIComponent("T. Rieth")}`;
+	// Default to the redesign's shape: square crest attachment (2026-07-05 — no more wide-card
+	// attachments; a square crest IS a clean collapsed thumbnail).
+	const imageUrl = payload.imageUrl ?? `${env.PROXY_PUBLIC_URL.replace(/\/$/, "")}/crest/WAS`;
 
-	const alert: Record<string, string> = {
-		title: payload.title ?? "GOAL — WAS 1–0 ORL",
-		body: payload.body ?? "Washington Spirit scored.",
-	};
-	if (payload.subtitle) alert.subtitle = payload.subtitle;
-
-	// Crop the collapsed thumbnail to the scoring crest (home side of the default WAS 1–0 card).
-	// Defaulted so the test push exercises the NSE crop; override via the request body.
-	const thumbnailRect = payload.thumbnailRect ?? (event === "goal" ? [12 / 720, 20 / 296, 92 / 720, 92 / 296] : undefined);
+	// Title + subtitle only (the redesign's two-line contract); body honored if a caller passes one.
+	const alert: Record<string, string> = { title: payload.title ?? "GOAL: WAS 1–0 ORL" };
+	alert.subtitle = payload.subtitle ?? "T. Rieth 67'";
+	if (payload.body) alert.body = payload.body;
 
 	const aps = {
 		aps: {
@@ -604,13 +603,12 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 			"mutable-content": 1,
 			sound: "default",
 			"thread-id": `match-${eventID}`, // same eventID across goal + correction → they stack
-			"interruption-level": "time-sensitive",
+			"interruption-level": event === "halftime" || event === "lineup" ? "active" : "time-sensitive",
 		},
 		eventID,
 		matchId: eventID,
 		event,
 		imageUrl,
-		...(thumbnailRect ? { thumbnailRect } : {}),
 	};
 
 	// `token` present → that one device (back-compat). Omitted → fan out to ALL registered V1 device
