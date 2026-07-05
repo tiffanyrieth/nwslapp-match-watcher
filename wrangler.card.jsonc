@@ -1,0 +1,27 @@
+{
+	// nwslapp-card — the match-card PNG renderer, split out of the cron watcher so satori +
+	// resvg-wasm + fonts (~3.4MB) never sit in the watcher's cold-start path. See src/card-worker.ts.
+	"name": "nwslapp-card",
+	"main": "src/card-worker.ts",
+	"compatibility_date": "2025-06-01",
+	// satori pulls deps that reference `process` — nodejs_compat shims Node globals.
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": {
+		"enabled": true,
+	},
+	// Service binding to the sibling proxy for the self-hosted crest PNGs (card.ts renderSvg).
+	// A binding, not a workers.dev fetch: same-account Worker→Worker over workers.dev → CF error 1042.
+	"services": [
+		{
+			"binding": "PROXY",
+			"service": "nwslapp-proxy",
+		},
+	],
+	// The Inter woff faces satori consumes are Data modules (ArrayBuffer). `.wasm` keeps its
+	// default CompiledWasm rule.
+	"rules": [
+		{ "type": "Data", "globs": ["**/*.woff"], "fallthrough": true },
+	],
+	// NO kv / crons / vars / secrets: this Worker only renders cards from URL params + the
+	// PROXY crest fetch. The imageUrl origin lives on the WATCHER as CARD_PUBLIC_URL.
+}

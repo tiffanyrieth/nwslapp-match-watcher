@@ -38,7 +38,11 @@ import {
 	type ScoreboardEvent,
 	type StoredState,
 } from "./events";
-import { handleCard } from "./card";
+// NOTE: the /card PNG renderer (satori + resvg-wasm + fonts, ~3.4MB) is NO LONGER imported
+// here. It lives in the sibling `nwslapp-card` worker (src/card-worker.ts + wrangler.card.jsonc)
+// so its cold-start module-eval never touches this cron's per-tick CPU budget — the fix for the
+// "Exceeded CPU Time Limits" errors. This worker only builds card URLs (CARD_PUBLIC_URL) and
+// 302-redirects any /card request that lands here (late-delivered pushes carry the old origin).
 import { activityTokensForMatch, allDeviceTokens, allStartTokens, pruneDeadTokens, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { endLiveActivity, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
@@ -59,8 +63,9 @@ export interface Env {
 	/** APNs host — api.sandbox.push.apple.com (dev) or api.push.apple.com (TestFlight). */
 	APNS_HOST: string;
 
-	/** This worker's own public origin (where GET /card lives) — goes in `imageUrl`. */
-	WATCHER_PUBLIC_URL: string;
+	/** The sibling `nwslapp-card` worker's origin — V1 pushes attach its /thumb/{ABBR} crest tile
+	 *  (public URL: the NSE downloads over the internet), and /card/* 302s there for late pushes. */
+	CARD_PUBLIC_URL: string;
 
 	/** Service binding to the sibling proxy (its /scoreboard + /crest routes). A binding,
 	 *  not a workers.dev fetch: same-account Worker→Worker over the public URL fails with
@@ -112,7 +117,7 @@ const LA_START_LEAD_MS = 20 * 60 * 1000; // remote-start the Activity ≤20 min 
 // registration window (a device can take minutes to observe the Activity + upload its per-Activity token;
 // ≤5 min bled past kickoff and missed early goals). Doubles as the pre-match "SOON" glance card.
 const LA_RESYNC_MS = 10 * 60 * 1000; // clock-drift resync cadence (the widget's local timer ticks between)
-const LA_DISMISS_AFTER_S = 15 * 60; // keep the FT card on the lock screen ~15 min, then dismiss
+const LA_DISMISS_AFTER_S = 15 * 60; // TEST-ONLY (/test-activity end): quick self-clean for test cards. The real cron omits dismissal-date → FT card lingers up to Apple's ~4h cap, user-dismissable.
 
 function apnsConfig(env: Env): ApnsConfig {
 	return {
@@ -140,14 +145,16 @@ export default {
 
 		if (request.method === "GET" && url.pathname === "/") {
 			return new Response(
-				"nwslapp-match-watcher — cron live-event watcher (kickoff/goal/halftime/full-time). POST /test-push (x-trigger-secret) to send a synthetic push. GET /card/<matchId>?e&h&a&hs&as&min&sc renders the match card.",
+				"nwslapp-match-watcher — cron live-event watcher (kickoff/goal/halftime/full-time). POST /test-push (x-trigger-secret) to send a synthetic push. GET /card/* 302-redirects to the nwslapp-card worker.",
 				{ status: 200 },
 			);
 		}
 
-		// Server-rendered match-card PNG attached to rich pushes (downloaded by the NSE).
+		// The card renderer moved to the nwslapp-card worker. Any /card request here is a push
+		// APNs stored and delivered late (its imageUrl carries this old origin) — 302 it onward so
+		// the NSE (which follows redirects) still gets the PNG. Permanent, not a transition shim.
 		if (request.method === "GET" && url.pathname.startsWith("/card/")) {
-			return handleCard(request, env, ctx);
+			return Response.redirect(`${env.CARD_PUBLIC_URL.replace(/\/$/, "")}${url.pathname}${url.search}`, 302);
 		}
 
 		if (request.method === "POST" && url.pathname === "/test-push") {
@@ -251,7 +258,7 @@ async function runWatch(env: Env): Promise<void> {
 			if (tokens.length === 0) return;
 
 			jwt ??= await apnsJwt(apns);
-			const payload = toPayload(ev, env.WATCHER_PUBLIC_URL);
+			const payload = toPayload(ev, env.CARD_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 			console.log(`[watcher] ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 			await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -285,8 +292,11 @@ async function runWatch(env: Env): Promise<void> {
 		// later "post" tick is skipped by the no-prev guard above — no duplicate FT).
 		// V2 Live Activity (ADDITIVE — the V1 push path above is untouched). Pushes the current
 		// state to this match's running Activities on an event / correction / full-time / periodic resync.
+		// Reconcile the monotonic widget-clock anchor BEFORE the LA sync so stoppage-time pushes
+		// carry a stable clockStartEpoch (see StoredState.virtualKickoff).
+		const newState = nextState(prev, effectiveMatch, detected, Math.floor(Date.now() / 1000));
 		try {
-			await syncLiveActivity(env, sb, apns, effectiveMatch, detected.length > 0 || correctionFired);
+			await syncLiveActivity(env, sb, apns, effectiveMatch, detected.length > 0 || correctionFired, newState.virtualKickoff);
 		} catch (err) {
 			console.log(`[watcher] LA sync failed (${match.eventId}): ${err}`);
 		}
@@ -294,7 +304,7 @@ async function runWatch(env: Env): Promise<void> {
 		if (effectiveMatch.state === "post") {
 			await env.MATCH_STATE.delete(key);
 		} else {
-			await env.MATCH_STATE.put(key, JSON.stringify(nextState(prev, effectiveMatch, detected)), {
+			await env.MATCH_STATE.put(key, JSON.stringify(newState), {
 				expirationTtl: MATCH_STATE_TTL,
 			});
 		}
@@ -336,7 +346,7 @@ async function runWatch(env: Env): Promise<void> {
 				}
 				if (tokens.length === 0) continue;
 				jwt ??= await apnsJwt(apns);
-				const payload = toPayload(ev, env.WATCHER_PUBLIC_URL);
+				const payload = toPayload(ev, env.CARD_PUBLIC_URL);
 				const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
 				console.log(`[watcher] NT ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 				await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -372,6 +382,7 @@ async function syncLiveActivity(
 	apns: ApnsConfig,
 	match: Match,
 	hadEvent: boolean,
+	virtualKickoff?: number,
 ): Promise<void> {
 	const ended = match.state === "post";
 	const rsKey = `la-rs:${match.eventId}`;
@@ -380,11 +391,13 @@ async function syncLiveActivity(
 	const tokens = await activityTokensForMatch(sb, match.eventId);
 	if (tokens.length === 0) return;
 	const jwt = await apnsJwt(apns);
-	const state: LiveContentState = contentStateFromMatch(match);
+	const state: LiveContentState = contentStateFromMatch(match, virtualKickoff);
 
 	if (ended) {
-		const dismissAt = Math.floor(Date.now() / 1000) + LA_DISMISS_AFTER_S;
-		const endResults = await Promise.all(tokens.map((t) => endLiveActivity(t, state, jwt, apns, dismissAt)));
+		// No dismissal-date → system default: the FT card lingers on the lock screen up to Apple's
+		// ~4h cap (dates further out are ignored), dismissable by the user anytime (owner request,
+		// 2026-07-05). The 15-min quick dismiss lives on only in /test-activity (test cards self-clean).
+		const endResults = await Promise.all(tokens.map((t) => endLiveActivity(t, state, jwt, apns)));
 		await pruneDeadTokens(sb, "live_activities", "push_token", endResults);
 		await env.MATCH_STATE.delete(rsKey);
 		await env.MATCH_STATE.delete(seenKey);
@@ -445,7 +458,18 @@ async function startUpcomingActivities(
 		const jwt = await apnsJwt(apns);
 		const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr);
 		const state = preContentState(kickoffLabel(ko));
-		const results = await Promise.all(tokens.map((t) => startLiveActivity(t, attrs, state, jwt, apns)));
+		// QUIET BANNER (device-proven 7/4): the start push MUST carry an `alert` or iOS silently never
+		// renders the card (APNs 200s regardless — the old no-alert "silent" design shipped invisible
+		// Activities). `sound: ""` keeps it buzz-free: card + banner appear with NO sound/vibration, so
+		// V1's kickoff push at minute 0 remains the single audible interrupt. All three axes A/B'd on
+		// device 2026-07-04: no alert → never renders; alert w/o sound key → renders but BUZZES;
+		// alert + sound:"" → renders, no buzz.
+		const startAlert = {
+			title: `${info.homeAbbr} vs ${info.awayAbbr}`,
+			body: "Live match card is on your lock screen.",
+			sound: "",
+		};
+		const results = await Promise.all(tokens.map((t) => startLiveActivity(t, attrs, state, jwt, apns, undefined, startAlert)));
 		const ok = results.filter((r) => r.ok).length;
 		console.log(`[watcher] LA start ${info.homeAbbr} vs ${info.awayAbbr}: ${ok}/${tokens.length}`);
 		await pruneDeadTokens(sb, "live_activity_start_tokens", "token", results);
@@ -494,7 +518,7 @@ async function checkUpcomingLineups(
 			teamIds: [info.homeId, info.awayId],
 			prefColumn: "lineup_posted",
 			title: `Lineups in — ${info.homeAbbr} vs ${info.awayAbbr}`,
-			body: "Starting XIs are posted — see who's playing.",
+			subtitle: "Starting XIs are posted",
 			homeAbbr: info.homeAbbr,
 			awayAbbr: info.awayAbbr,
 			homeScore: 0,
@@ -510,7 +534,7 @@ async function checkUpcomingLineups(
 		}
 		if (tokens.length > 0) {
 			const jwt = await apnsJwt(apns);
-			const payload = toPayload(lineupEvent, env.WATCHER_PUBLIC_URL);
+			const payload = toPayload(lineupEvent, env.CARD_PUBLIC_URL);
 			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt, apns)));
 			console.log(`[watcher] lineup ${info.homeAbbr} vs ${info.awayAbbr}: ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
 			await pruneDeadTokens(sb, "device_tokens", "token", results);
@@ -555,7 +579,6 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 		eventID?: string;
 		event?: string;
 		imageUrl?: string;
-		thumbnailRect?: number[];
 	};
 	try {
 		payload = (await request.json()) as typeof payload;
@@ -566,20 +589,14 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	const jwt = await apnsJwt(apns);
 	const eventID = payload.eventID ?? "401853925";
 	const event = payload.event ?? "goal";
-	// Default to a real-looking goal card on this worker if the caller didn't pass one.
-	const imageUrl =
-		payload.imageUrl ??
-		`${env.WATCHER_PUBLIC_URL.replace(/\/$/, "")}/card/${eventID}?e=${event}&h=WAS&a=ORL&hs=1&as=0&min=67&sc=${encodeURIComponent("T. Rieth")}`;
+	// Default to the redesign's shape: square crest attachment (2026-07-05 — no more wide-card
+	// attachments; a square crest IS a clean collapsed thumbnail).
+	const imageUrl = payload.imageUrl ?? `${env.CARD_PUBLIC_URL.replace(/\/$/, "")}/thumb/WAS?s=3`;
 
-	const alert: Record<string, string> = {
-		title: payload.title ?? "GOAL — WAS 1–0 ORL",
-		body: payload.body ?? "Washington Spirit scored.",
-	};
-	if (payload.subtitle) alert.subtitle = payload.subtitle;
-
-	// Crop the collapsed thumbnail to the scoring crest (home side of the default WAS 1–0 card).
-	// Defaulted so the test push exercises the NSE crop; override via the request body.
-	const thumbnailRect = payload.thumbnailRect ?? (event === "goal" ? [12 / 720, 20 / 296, 92 / 720, 92 / 296] : undefined);
+	// Title + subtitle only (the redesign's two-line contract); body honored if a caller passes one.
+	const alert: Record<string, string> = { title: payload.title ?? "GOAL — Washington Spirit" };
+	alert.subtitle = payload.subtitle ?? "WAS 1–0 ORL · T. Rieth 67'";
+	if (payload.body) alert.body = payload.body;
 
 	const aps = {
 		aps: {
@@ -587,13 +604,12 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 			"mutable-content": 1,
 			sound: "default",
 			"thread-id": `match-${eventID}`, // same eventID across goal + correction → they stack
-			"interruption-level": "time-sensitive",
+			"interruption-level": event === "halftime" || event === "lineup" ? "active" : "time-sensitive",
 		},
 		eventID,
 		matchId: eventID,
 		event,
 		imageUrl,
-		...(thumbnailRect ? { thumbnailRect } : {}),
 	};
 
 	// `token` present → that one device (back-compat). Omitted → fan out to ALL registered V1 device
@@ -654,6 +670,9 @@ async function handleTestActivity(request: Request, env: Env): Promise<Response>
 		min?: number;
 		sc?: string;
 		comp?: string;
+		/** DIAGNOSTIC: `alert: true` (or {title,body,sound?}) adds an alert to a START push. Proven
+		 *  7/4: no alert → iOS never renders. `sound: ""` A/Bs a buzz-free banner. Test-only. */
+		alert?: boolean | { title: string; body: string; sound?: string };
 	};
 	try {
 		p = (await request.json()) as typeof p;
@@ -708,13 +727,23 @@ async function handleTestActivity(request: Request, env: Env): Promise<Response>
 		);
 	}
 
+	// Diagnostic alert (see the `alert` field doc above), applied to ANY mode — start renders the
+	// card (REQUIRED there), update/end A/B the "V2 buzzes on status changes" capability. `true` → a
+	// generic pair.
+	const testAlert =
+		p.alert === true
+			? { title: `${p.h ?? "ORL"} vs ${p.a ?? "POR"}`, body: "Match card is live on your lock screen." }
+			: p.alert && typeof p.alert === "object"
+				? p.alert
+				: undefined;
+
 	const send = (token: string) => {
 		if (mode === "start") {
 			const attrs = attributesFor(matchId, p.h ?? "ORL", p.a ?? "POR", p.comp ?? "NWSL");
-			return startLiveActivity(token, attrs, state, jwt, apns);
+			return startLiveActivity(token, attrs, state, jwt, apns, undefined, testAlert);
 		}
-		if (mode === "end") return endLiveActivity(token, state, jwt, apns, nowSec + LA_DISMISS_AFTER_S);
-		return updateLiveActivity(token, state, jwt, apns);
+		if (mode === "end") return endLiveActivity(token, state, jwt, apns, nowSec + LA_DISMISS_AFTER_S, testAlert);
+		return updateLiveActivity(token, state, jwt, apns, { alert: testAlert });
 	};
 	const results = await Promise.all(tokens.map(send));
 	const okCount = results.filter((r) => r.ok).length;
