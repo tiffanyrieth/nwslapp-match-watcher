@@ -362,8 +362,16 @@ async function main() {
 	else if (UPDATES_ONLY) steps = steps.filter((s) => s.kind !== "pre");
 	schedule(steps);
 
-	console.log(`\n▶ Schedule (${steps.length} steps, ${h} home / ${a} away, event ${eventId}):`);
-	for (const s of steps) console.log(`  [${fmtClock(s.offsetSec)}] ${s.label.padEnd(34)} ${s.phase.padEnd(9)} ${s.hs}-${s.as}${s.sc ? "  · " + s.sc : ""}`);
+	// Live run: DON'T dump the whole schedule up front (it reads like the replay already happened in
+	// one shot). Print only a one-line summary; each step's line then appears LIVE as it actually fires,
+	// paced across the wall-clock window. The full per-step schedule prints only in --dry-run (a preview).
+	const lastOff = steps.length ? steps[steps.length - 1].offsetSec : 0;
+	if (DRY) {
+		console.log(`\n▶ Schedule (${steps.length} steps, ${h} home / ${a} away, event ${eventId}):`);
+		for (const s of steps) console.log(`  [${fmtClock(s.offsetSec)}] ${s.label.padEnd(34)} ${s.phase.padEnd(9)} ${s.hs}-${s.as}${s.sc ? "  · " + s.sc : ""}`);
+	} else {
+		console.log(`\n▶ ${steps.length} steps, ${h} ${DRY ? "" : "home"} vs ${a}, event ${eventId} — playing out live over ~${fmtClock(lastOff)} (lines appear as each event fires).`);
+	}
 
 	if (DRY) {
 		console.log("\n(dry run — nothing sent)\n");
