@@ -55,6 +55,20 @@ const PROXY_URL = (process.env.PROXY_URL ?? "https://nwslapp-proxy.tiffany-rieth
 const SECRET = process.env.MANUAL_TRIGGER_SECRET ?? process.env.TRIGGER_SECRET ?? "";
 const FIXTURE_PATH = resolve(__dirname, "../../NWSLApp/NWSLAppTests/Fixtures/summary.json");
 
+// SINGLE-DEVICE TARGETING — set these to send ONLY to your own phone instead of fanning out to every
+// registered device. MY_START_TOKEN = your push-to-start token (scopes the /test-activity START; every
+// update/end then follows only your Activity because it's keyed by this synthetic matchId). MY_DEVICE_TOKEN
+// = your APNs device token (scopes the V1 /test-push cards used by --correction). Pull both from Supabase:
+//   select t.token as start_token, d.token as device_token
+//   from live_activity_start_tokens t
+//   join device_tokens d on d.user_id = t.user_id and d.device_id = t.device_id
+//   where t.user_id = '<your uuid>';
+// Unset → original behavior (fan out to ALL devices). Tip: use a fresh --match-id per run so a prior
+// test's per-Activity token on another phone can't catch an update.
+const MY_START_TOKEN = process.env.MY_START_TOKEN ?? "";
+const MY_DEVICE_TOKEN = process.env.MY_DEVICE_TOKEN ?? "";
+const SINGLE_DEVICE = Boolean(MY_START_TOKEN || MY_DEVICE_TOKEN);
+
 // Scheduling constants.
 const END_HOLD_S = 12; //   keep the FT card visible before the end/dismiss push
 const MIN_GAP_S = 10; //    floor between any two consecutive sends
@@ -219,6 +233,9 @@ async function send(step, h, a) {
 	const mode = step.kind === "pre" ? "start" : step.kind === "end" ? "end" : "update";
 	const body = { mode, matchId: MATCH_ID, phase: step.phase, hs: step.hs, as: step.as };
 	if (mode === "start") Object.assign(body, { h, a, comp: "NWSL" });
+	// Scope the START to one device (its push-to-start token). Updates/end omit token and target every
+	// per-Activity token for this matchId — only YOUR Activity exists for it, so they reach only you too.
+	if (mode === "start" && MY_START_TOKEN) body.token = MY_START_TOKEN;
 	if (step.matchMin > 0 && step.phase === "live") body.min = step.matchMin;
 	if (step.sc) body.sc = step.sc;
 
@@ -241,9 +258,9 @@ async function pushV1({ label, title, body, event, imageUrl }) {
 	const res = await fetch(`${WATCHER_URL}/test-push`, {
 		method: "POST",
 		headers: { "content-type": "application/json", "x-trigger-secret": SECRET },
-		// no token → the watcher fans out to ALL registered device tokens; same eventID across the goal
-		// and the correction → both carry thread-id match-<MATCH_ID> → they stack on the lock screen.
-		body: JSON.stringify({ eventID: MATCH_ID, event, title, body, imageUrl }),
+		// token present → only your phone; omitted → fans out to ALL device tokens. Same eventID across the
+		// goal and the correction → both carry thread-id match-<MATCH_ID> → they stack on the lock screen.
+		body: JSON.stringify({ eventID: MATCH_ID, event, title, body, imageUrl, ...(MY_DEVICE_TOKEN ? { token: MY_DEVICE_TOKEN } : {}) }),
 	});
 	const out = await res.json().catch(() => ({}));
 	const fails = (out.results ?? []).filter((r) => !r.ok).map((r) => `${r.status}:${r.reason ?? "?"}`);
@@ -287,7 +304,7 @@ async function runCorrection(summary) {
 		return;
 	}
 
-	console.log(`\n▶ Firing goal → correction (watch both phones)…\n`);
+	console.log(`\n▶ Firing goal → correction (watch your phone)…\n`);
 	const g = await pushV1({
 		label: `GOAL ${h} ${old.hs}–${old.as} ${a}`,
 		title: `GOAL — ${h} ${old.hs}–${old.as} ${a}`,
@@ -317,7 +334,8 @@ async function runCorrection(summary) {
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
-	console.log(`\n🟢 Live Activity replay — ${DRY ? "DRY RUN" : "LIVE"}  (matchId=${MATCH_ID}, ~${TOTAL_MIN} min)\n`);
+	console.log(`\n🟢 Live Activity replay — ${DRY ? "DRY RUN" : "LIVE"}  (matchId=${MATCH_ID}, ~${TOTAL_MIN} min)`);
+	console.log(SINGLE_DEVICE ? `🎯 Single-device mode — sending ONLY to your phone (start${MY_DEVICE_TOKEN ? " + V1" : ""} token set).\n` : `📡 Fan-out mode — sending to ALL registered devices.\n`);
 	if (!DRY && !SECRET) {
 		console.error("✗ MANUAL_TRIGGER_SECRET not set. Run with the watcher's trigger secret, or use --dry-run.");
 		process.exit(1);
@@ -343,7 +361,7 @@ async function main() {
 		return;
 	}
 
-	console.log(`\n▶ Driving the lifecycle (watch both phones)…\n`);
+	console.log(`\n▶ Driving the lifecycle (watch your phone)…\n`);
 	let t0 = Date.now();
 	let warnedNoActivity = false;
 	for (let i = 0; i < steps.length; i++) {
