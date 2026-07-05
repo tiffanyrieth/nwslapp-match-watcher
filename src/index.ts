@@ -81,6 +81,20 @@ export interface Env {
 const PROXY_SCOREBOARD = "https://proxy/scoreboard";
 const PROXY_SUMMARY = "https://proxy/summary";
 
+// The watcher only cares about matches in the LIVE WINDOW (kickoff-5min → kickoff+4h), so it fetches
+// a 3-day scoreboard slice (yesterday→tomorrow, UTC — the ±1 days cover any ET/UTC date-boundary game)
+// instead of the whole season. Parsing ~240 season events every minute was needless CPU that pushed
+// live ticks past the free plan's per-invocation limit (Exceeded CPU blips during a live game,
+// 2026-07-05). The app's schedule fetches the full season separately — this is watcher-only. ZERO
+// user-facing change: same per-minute check, same live detection, same alerts — just a smaller payload.
+function scoreboardWindow(): string {
+	const d = (offsetDays: number): string => {
+		const t = new Date(Date.now() + offsetDays * 86_400_000);
+		return `${t.getUTCFullYear()}${String(t.getUTCMonth() + 1).padStart(2, "0")}${String(t.getUTCDate()).padStart(2, "0")}`;
+	};
+	return `${d(-1)}-${d(1)}`; // yesterday → tomorrow, UTC
+}
+
 // The women's national-team ESPN scoreboard slugs — the SAME set the app polls for the schedule
 // (NationalTeamFeed.all in the app's Models/Competition.swift). Reached through the proxy's
 // `/scoreboard?league=<slug>` (all allowlisted there), so no new route/auth. Most are seasonal
@@ -189,9 +203,9 @@ function kickoffMs(event: ScoreboardEvent): number | null {
  * the proxy's ~30s live cache and just re-read the same (possibly glitched) payload — making the
  * debounce a no-op. Returns null on fetch failure or if the event is no longer present.
  */
-async function refetchMatch(env: Env, year: number, eventId: string): Promise<Match | null> {
+async function refetchMatch(env: Env, eventId: string): Promise<Match | null> {
 	try {
-		const url = `${PROXY_SCOREBOARD}?dates=${year}0101-${year}1231&limit=500&_cb=${Date.now()}`;
+		const url = `${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500&_cb=${Date.now()}`;
 		const res = await env.PROXY.fetch(url, { headers: { Accept: "application/json" } });
 		if (!res.ok) {
 			console.log(`[watcher] correction re-poll failed: ${res.status}`);
@@ -208,11 +222,10 @@ async function refetchMatch(env: Env, year: number, eventId: string): Promise<Ma
 
 /** One poll: scoreboard → per-match diff → event pushes. */
 async function runWatch(env: Env): Promise<void> {
-	const year = new Date().getUTCFullYear();
 	const now = Date.now();
 	let events: ScoreboardEvent[];
 	try {
-		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${year}0101-${year}1231&limit=500`, {
+		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500`, {
 			headers: { Accept: "application/json" },
 		});
 		if (!res.ok) {
@@ -277,7 +290,7 @@ async function runWatch(env: Env): Promise<void> {
 				`[watcher] correction candidate ${match.eventId}: ${candidate.prev.home}-${candidate.prev.away} → ${match.home.score}-${match.away.score}; debouncing ${CORRECTION_DEBOUNCE_MS}ms`,
 			);
 			await sleep(CORRECTION_DEBOUNCE_MS);
-			const recheck = await refetchMatch(env, year, match.eventId);
+			const recheck = await refetchMatch(env, match.eventId);
 			if (recheck) effectiveMatch = recheck; // freshest truth → baseline + LA from it, fired or not
 			if (confirmCorrection(candidate, recheck)) {
 				await fireV1(correctionEvent(candidate.prev, recheck!));
@@ -317,7 +330,7 @@ async function runWatch(env: Env): Promise<void> {
 	for (const slug of NT_LEAGUES) {
 		let ntEvents: ScoreboardEvent[];
 		try {
-			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?league=${slug}&dates=${year}0101-${year}1231&limit=500`, {
+			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?league=${slug}&dates=${scoreboardWindow()}&limit=500`, {
 				headers: { Accept: "application/json" },
 			});
 			if (!res.ok) continue;
