@@ -224,10 +224,12 @@ export function lineupsPublished(summary: SummaryLike | null | undefined): boole
 	return rosters.every((r) => starters(r) >= 11);
 }
 
-// ── Copy system (2026-07-05 redesign) ─────────────────────────────────────────
-// Title = `Event: scoreline/matchup` (caps only on GOAL / NO GOAL — the two peaks);
-// Subtitle = the one detail line; NO body. Two teams together → abbreviations + en-dash
-// (the app-wide naming rule); one team as subject (FT winner) → full club name.
+// ── Copy system (2026-07-05 v3 — subject-first) ───────────────────────────────
+// Title leads with the event + its SUBJECT (the club that acted), so the title always agrees
+// with the attached crest — "GOAL: NC 0–1 SEA" + a SEA crest read as if NC scored (owner UX
+// finding; the DC United app's hierarchy is the industry standard here). Line 2 = the macro
+// scoreboard + detail, `·`-separated. NO body. Two teams together → abbreviations + en-dash;
+// one team as subject (scorer's club, FT winner) → full club name. Caps only on GOAL/NO GOAL.
 
 // "WAS 1–0 ORL"
 function scoreline(match: Match): string {
@@ -239,11 +241,13 @@ function matchup(match: Match): string {
 	return `${match.home.abbr} vs ${match.away.abbr}`;
 }
 
-/** FT subtitle: "Washington Spirit win" (one-team subject → full club name) / "It's a draw". */
+/** FT line 2: "NC 2–1 SEA · North Carolina Courage win" (winner = full club name, matching
+ *  the attached winner's crest) / "… · It's a draw". */
 function fullTimeSubtitle(match: Match): string {
-	if (match.home.score > match.away.score) return `${match.home.name} win`;
-	if (match.away.score > match.home.score) return `${match.away.name} win`;
-	return "It's a draw";
+	const score = scoreline(match);
+	if (match.home.score > match.away.score) return `${score} · ${match.home.name} win`;
+	if (match.away.score > match.home.score) return `${score} · ${match.away.name} win`;
+	return `${score} · It's a draw`;
 }
 
 /** The most recent scoring play attributed to `teamId`, if any. */
@@ -253,11 +257,12 @@ function latestPlayFor(match: Match, teamId: string): ScoringPlay | undefined {
 	return found;
 }
 
-/** Goal subtitle: "S. Menti 19'" — scorer + minute, degrading gracefully to whichever is
- *  attributed; falls back to the club name when ESPN attributed nothing (no fabrication). */
-function goalSubtitle(scoringSide: Side, play?: ScoringPlay): string {
-	if (play?.scorer) return play.minute != null ? `${play.scorer} ${play.minute}'` : play.scorer;
-	return scoringSide.name;
+/** Goal line 2: "NC 0–1 SEA · S. Menti 19'" — the macro scoreboard, then scorer + minute
+ *  (degrading gracefully to whichever is attributed; never fabricated). */
+function goalSubtitle(match: Match, play?: ScoringPlay): string {
+	const score = scoreline(match);
+	if (!play?.scorer) return score;
+	return play.minute != null ? `${score} · ${play.scorer} ${play.minute}'` : `${score} · ${play.scorer}`;
 }
 
 /** Kickoff subtitle: "Audi Field · Victory+" — where + how to watch (the old body's info,
@@ -310,7 +315,7 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 			...base,
 			type: "kickoff",
 			prefColumn: "kickoff",
-			title: `Kickoff: ${matchup(match)}`,
+			title: `Kickoff — ${matchup(match)}`,
 			subtitle: kickoffSubtitle(match),
 		});
 	}
@@ -324,8 +329,8 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 				...base,
 				type: "goal",
 				prefColumn: "goals",
-				title: `GOAL: ${scoreline(match)}`,
-				subtitle: goalSubtitle(match.home, play),
+				title: `GOAL — ${match.home.name}`,
+				subtitle: goalSubtitle(match, play),
 				scoringSide: "home",
 				minute: play?.minute,
 				scorer: play?.scorer,
@@ -337,8 +342,8 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 				...base,
 				type: "goal",
 				prefColumn: "goals",
-				title: `GOAL: ${scoreline(match)}`,
-				subtitle: goalSubtitle(match.away, play),
+				title: `GOAL — ${match.away.name}`,
+				subtitle: goalSubtitle(match, play),
 				scoringSide: "away",
 				minute: play?.minute,
 				scorer: play?.scorer,
@@ -348,13 +353,14 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 
 	// Halftime — fired once while STATUS_HALFTIME holds.
 	if (match.state === "in" && match.statusName === "STATUS_HALFTIME" && !prev?.halftimeSent) {
-		events.push({ ...base, type: "halftime", prefColumn: "halftime", title: `Halftime: ${scoreline(match)}`, subtitle: lastScorerLine(match) ?? "It's the break" });
+		const scorers = lastScorerLine(match);
+		events.push({ ...base, type: "halftime", prefColumn: "halftime", title: "Halftime", subtitle: scorers ? `${scoreline(match)} · ${scorers}` : scoreline(match) });
 	}
 
 	// Full time — transition from live to ended. Winner's crest attaches (draw → home).
 	if (prev && prev.state === "in" && match.state === "post") {
 		const winnerSide = match.home.score > match.away.score ? "home" : match.away.score > match.home.score ? "away" : undefined;
-		events.push({ ...base, type: "fulltime", prefColumn: "full_time", title: `Full time: ${scoreline(match)}`, subtitle: fullTimeSubtitle(match), scoringSide: winnerSide });
+		events.push({ ...base, type: "fulltime", prefColumn: "full_time", title: "Full time", subtitle: fullTimeSubtitle(match), scoringSide: winnerSide });
 	}
 
 	return events;
@@ -405,8 +411,10 @@ export function correctionEvent(prev: { home: number; away: number }, match: Mat
 		eventId: match.eventId,
 		teamIds: [match.home.id, match.away.id],
 		prefColumn: "goals", // whoever opted into goal alerts wants to know one was reversed
-		title: `NO GOAL: ${scoreline(match)}`, // corrected score; the title IS the reversal
-		subtitle: "VAR review — goal disallowed",
+		// Subject-first: name the club whose goal was disallowed (matches the attached crest);
+		// fall back to a neutral title if ESPN's numbers didn't isolate a side.
+		title: disallowedSide ? `NO GOAL — ${(disallowedSide === "home" ? match.home : match.away).name}` : "NO GOAL — VAR review",
+		subtitle: `${scoreline(match)} · VAR review`,
 		homeAbbr: match.home.abbr,
 		awayAbbr: match.away.abbr,
 		homeScore: match.home.score,

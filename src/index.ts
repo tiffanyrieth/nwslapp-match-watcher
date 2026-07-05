@@ -513,7 +513,7 @@ async function checkUpcomingLineups(
 			eventId: info.matchId,
 			teamIds: [info.homeId, info.awayId],
 			prefColumn: "lineup_posted",
-			title: `Lineups in: ${info.homeAbbr} vs ${info.awayAbbr}`,
+			title: `Lineups in — ${info.homeAbbr} vs ${info.awayAbbr}`,
 			subtitle: "Starting XIs are posted",
 			homeAbbr: info.homeAbbr,
 			awayAbbr: info.awayAbbr,
@@ -590,8 +590,8 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 	const imageUrl = payload.imageUrl ?? `${env.CARD_PUBLIC_URL.replace(/\/$/, "")}/thumb/WAS?s=3`;
 
 	// Title + subtitle only (the redesign's two-line contract); body honored if a caller passes one.
-	const alert: Record<string, string> = { title: payload.title ?? "GOAL: WAS 1–0 ORL" };
-	alert.subtitle = payload.subtitle ?? "T. Rieth 67'";
+	const alert: Record<string, string> = { title: payload.title ?? "GOAL — Washington Spirit" };
+	alert.subtitle = payload.subtitle ?? "WAS 1–0 ORL · T. Rieth 67'";
 	if (payload.body) alert.body = payload.body;
 
 	const aps = {

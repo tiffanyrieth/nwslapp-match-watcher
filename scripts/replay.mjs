@@ -301,15 +301,15 @@ async function sendV1ForStep(step, h, a) {
 	let crestAbbr = h;
 	let event, title, subtitle;
 	if (step.kind === "kickoff") {
-		event = "kickoff"; title = `Kickoff: ${h} vs ${a}`; subtitle = "The match is underway";
+		event = "kickoff"; title = `Kickoff — ${h} vs ${a}`; subtitle = "The match is underway";
 	} else if (step.kind === "goal") {
-		event = "goal"; title = `GOAL: ${score}`; subtitle = step.sc ?? "Goal";
+		event = "goal"; title = `GOAL — ${step.scoringAbbr ?? h}`; subtitle = step.sc ? `${score} · ${step.sc}` : score;
 		crestAbbr = step.scoringAbbr ?? h;
 	} else if (step.kind === "ht") {
-		event = "halftime"; title = `Halftime: ${score}`; subtitle = "It's the break";
+		event = "halftime"; title = "Halftime"; subtitle = score;
 	} else if (step.kind === "ft") {
-		event = "fulltime"; title = `Full time: ${score}`;
-		subtitle = step.hs === step.as ? "It's a draw" : "Winners take the points";
+		event = "fulltime"; title = "Full time";
+		subtitle = step.hs === step.as ? `${score} · It's a draw` : `${score} · ${step.hs > step.as ? h : a} win`;
 		crestAbbr = step.hs > step.as ? h : step.as > step.hs ? a : h;
 	} else return;
 	await pushV1({ label: `${event} ${score}`, title, subtitle, event, imageUrl: `${CARD_URL}/thumb/${crestAbbr}?s=3` });
@@ -319,7 +319,7 @@ async function sendV1ForStep(step, h, a) {
 async function sendV1Lineup(h, a) {
 	await pushV1({
 		label: `lineup ${h} vs ${a}`,
-		title: `Lineups in: ${h} vs ${a}`,
+		title: `Lineups in — ${h} vs ${a}`,
 		subtitle: "Starting XIs are posted",
 		event: "lineup",
 		imageUrl: `${CARD_URL}/thumb/${h}?s=3`,
@@ -380,8 +380,8 @@ async function runCorrection(summary) {
 	// 2026-07-05 redesign: title+subtitle, square crest attachment (scoring club's crest).
 	const g = await pushV1({
 		label: `GOAL ${h} ${old.hs}–${old.as} ${a}`,
-		title: `GOAL: ${h} ${old.hs}–${old.as} ${a}`,
-		subtitle: scorer ? `${scorer} ${lastGoal.matchMin}'` : "Goal",
+		title: `GOAL — ${lastGoal.scoringAbbr ?? h}`,
+		subtitle: scorer ? `${h} ${old.hs}–${old.as} ${a} · ${scorer} ${lastGoal.matchMin}'` : `${h} ${old.hs}–${old.as} ${a}`,
 		event: "goal",
 		imageUrl: `${CARD_URL}/thumb/${lastGoal.scoringAbbr ?? h}?s=3`,
 	});
@@ -393,8 +393,8 @@ async function runCorrection(summary) {
 	await sleep(6000);
 	await pushV1({
 		label: `DISALLOWED ${h} ${corrected.hs}–${corrected.as} ${a}`,
-		title: `NO GOAL: ${h} ${corrected.hs}–${corrected.as} ${a}`,
-		subtitle: "VAR review — goal disallowed",
+		title: `NO GOAL — ${lastGoal.scoringAbbr ?? h}`,
+		subtitle: `${h} ${corrected.hs}–${corrected.as} ${a} · VAR review`,
 		event: "correction",
 		imageUrl: `${CARD_URL}/thumb/${lastGoal.scoringAbbr ?? h}?s=3`,
 	});
