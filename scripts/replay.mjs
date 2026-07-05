@@ -33,6 +33,9 @@
  *   ... --correction         VAR test: fire the last goal as a V1 push, then DISALLOW it — a V1
  *                            correction push (red card, struck score, stacks via thread-id) + a silent
  *                            V2 Live Activity score rollback. Mirrors the brief's goal-then-correction.
+ *   ... --with-v1            ALSO fire the matching V1 rich push at each moment (kickoff/goal/HT/FT,
+ *                            card image attached) — the full "every toggle on" experience. Set
+ *                            MY_DEVICE_TOKEN to scope the V1 pushes to one phone.
  *
  * NOTE (6/30 findings — the two traps that waste a whole session if forgotten):
  *   1. The per-Activity update token takes MINUTES to check in after the start (device must receive the
@@ -109,6 +112,10 @@ const START_HOLD_S = Number(val("start-hold", "180"));
 const START_ONLY = has("--start-only");
 const UPDATES_ONLY = has("--updates-only");
 const CORRECTION = has("--correction");
+// --with-v1: mirror each match moment with its V1 rich push too (kickoff/goal/HT/FT, card image
+// attached) — the full "every toggle on" experience: V1 banner buzzes, V2 card updates silently.
+// Single-device scoping: set MY_DEVICE_TOKEN so the V1 pushes hit only your phone.
+const WITH_V1 = has("--with-v1");
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -265,6 +272,29 @@ async function send(step, h, a) {
 // ── VAR correction test (V1 push + V2 LA rollback) ─────────────────────────────
 const cardImageUrl = (params) => `${CARD_URL}/card/${MATCH_ID}?${new URLSearchParams(params).toString()}`;
 
+/** --with-v1: fire the V1 rich push matching a replay step (mirrors the watcher's real event pushes —
+ *  abbreviation copy per the team-naming rule, card image attached). Pre/2nd-half/dismiss have no V1
+ *  equivalent in a real game, so they're skipped. */
+async function sendV1ForStep(step, h, a) {
+	const score = `${h} ${step.hs}–${step.as} ${a}`;
+	let event, title, body;
+	if (step.kind === "kickoff") {
+		event = "kickoff"; title = `Kickoff — ${h} vs ${a}`; body = "We're underway.";
+	} else if (step.kind === "goal") {
+		event = "goal"; title = `GOAL — ${score}`; body = step.sc ?? "Goal.";
+	} else if (step.kind === "ht") {
+		event = "halftime"; title = `Halftime — ${score}`; body = "Second half coming up.";
+	} else if (step.kind === "ft") {
+		event = "fulltime"; title = `Full-time — ${score}`; body = "That's the match.";
+	} else return;
+	const params = { e: event, h, a, hs: step.hs, as: step.as };
+	if (step.kind === "goal") {
+		if (step.matchMin > 0) params.min = step.matchMin;
+		if (step.sc) params.sc = step.sc.replace(/\s+\d+'.*$/, "").trim(); // scorer name w/o the minute suffix
+	}
+	await pushV1({ label: `${event} ${score}`, title, body, event, imageUrl: cardImageUrl(params) });
+}
+
 async function pushV1({ label, title, body, event, imageUrl }) {
 	const res = await fetch(`${WATCHER_URL}/test-push`, {
 		method: "POST",
@@ -388,6 +418,7 @@ async function main() {
 		const wait = step.offsetSec * 1000 - (Date.now() - t0);
 		if (wait > 0) await sleep(wait);
 		const r = await send(step, h, a);
+		if (WITH_V1) await sendV1ForStep(step, h, a); // mirror the moment as a V1 rich push too
 
 		if (step.kind === "pre" && !r.httpOk) {
 			if (r.error) console.error(`\n✗ Start fan-out errored server-side. Aborting.\n   ${r.error}`);
