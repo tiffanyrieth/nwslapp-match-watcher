@@ -35,8 +35,11 @@ function lastScorer(m: Match): string | undefined {
 	return undefined;
 }
 
-/** The current Live Activity content-state for a live/finished match (used for UPDATE / END). */
-export function contentStateFromMatch(m: Match): LiveContentState {
+/** The current Live Activity content-state for a live/finished match (used for UPDATE / END).
+ *  `virtualKickoff` (from StoredState) is the MONOTONIC anchor: ESPN freezes `status.clock` during
+ *  stoppage, so re-basing `now − clock` per push snapped the widget clock back to 45:00 on every
+ *  resync. When provided, it wins; the naive re-base remains the fallback (tests, first sighting). */
+export function contentStateFromMatch(m: Match, virtualKickoff?: number): LiveContentState {
 	const phase = phaseFromMatch(m);
 	const nowSec = Math.floor(Date.now() / 1000);
 	const running = phase === "live" || phase === "extraTime";
@@ -45,8 +48,7 @@ export function contentStateFromMatch(m: Match): LiveContentState {
 		homeScore: m.home.score,
 		awayScore: m.away.score,
 		phase,
-		// Virtual kickoff = now − elapsed; the widget advances the minute locally from here.
-		clockStartEpoch: running ? nowSec - m.clock : undefined,
+		clockStartEpoch: running ? (virtualKickoff ?? nowSec - m.clock) : undefined,
 		staticLabel,
 		lastScorer: lastScorer(m),
 	};

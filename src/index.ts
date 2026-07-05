@@ -292,8 +292,11 @@ async function runWatch(env: Env): Promise<void> {
 		// later "post" tick is skipped by the no-prev guard above — no duplicate FT).
 		// V2 Live Activity (ADDITIVE — the V1 push path above is untouched). Pushes the current
 		// state to this match's running Activities on an event / correction / full-time / periodic resync.
+		// Reconcile the monotonic widget-clock anchor BEFORE the LA sync so stoppage-time pushes
+		// carry a stable clockStartEpoch (see StoredState.virtualKickoff).
+		const newState = nextState(prev, effectiveMatch, detected, Math.floor(Date.now() / 1000));
 		try {
-			await syncLiveActivity(env, sb, apns, effectiveMatch, detected.length > 0 || correctionFired);
+			await syncLiveActivity(env, sb, apns, effectiveMatch, detected.length > 0 || correctionFired, newState.virtualKickoff);
 		} catch (err) {
 			console.log(`[watcher] LA sync failed (${match.eventId}): ${err}`);
 		}
@@ -301,7 +304,7 @@ async function runWatch(env: Env): Promise<void> {
 		if (effectiveMatch.state === "post") {
 			await env.MATCH_STATE.delete(key);
 		} else {
-			await env.MATCH_STATE.put(key, JSON.stringify(nextState(prev, effectiveMatch, detected)), {
+			await env.MATCH_STATE.put(key, JSON.stringify(newState), {
 				expirationTtl: MATCH_STATE_TTL,
 			});
 		}
@@ -379,6 +382,7 @@ async function syncLiveActivity(
 	apns: ApnsConfig,
 	match: Match,
 	hadEvent: boolean,
+	virtualKickoff?: number,
 ): Promise<void> {
 	const ended = match.state === "post";
 	const rsKey = `la-rs:${match.eventId}`;
@@ -387,7 +391,7 @@ async function syncLiveActivity(
 	const tokens = await activityTokensForMatch(sb, match.eventId);
 	if (tokens.length === 0) return;
 	const jwt = await apnsJwt(apns);
-	const state: LiveContentState = contentStateFromMatch(match);
+	const state: LiveContentState = contentStateFromMatch(match, virtualKickoff);
 
 	if (ended) {
 		// No dismissal-date → system default: the FT card lingers on the lock screen up to Apple's

@@ -92,6 +92,12 @@ export interface StoredState {
 	away: { id: string; score: number };
 	state: string;
 	halftimeSent: boolean;
+	/** Monotonic virtual kickoff (epoch sec) for the V2 widget clock: ESPN FREEZES `status.clock`
+	 *  at 2700/5400 during stoppage, so re-basing `now − clock` on every push made the widget clock
+	 *  jump back to 45:00 each resync. We keep the EARLIEST virtual kickoff seen within a period
+	 *  (min), so projected elapsed never rewinds; a period change re-bases (halftime pause). */
+	virtualKickoff?: number;
+	vkPeriod?: number;
 }
 
 export type MatchEventType = "kickoff" | "goal" | "halftime" | "fulltime" | "correction" | "lineup";
@@ -197,13 +203,27 @@ export function parseMatch(event: ScoreboardEvent): Match | null {
 	};
 }
 
-/** The KV state to persist for `match` after this poll (carrying the halftime flag). */
-export function nextState(prev: StoredState | null, match: Match, fired: MatchEvent[]): StoredState {
+/** The KV state to persist for `match` after this poll (carrying the halftime flag + the monotonic
+ *  virtual kickoff — see StoredState.virtualKickoff). `nowSec` is injected so this stays pure. */
+export function nextState(prev: StoredState | null, match: Match, fired: MatchEvent[], nowSec?: number): StoredState {
+	let virtualKickoff = prev?.virtualKickoff;
+	let vkPeriod = prev?.vkPeriod;
+	if (nowSec != null && match.state === "in") {
+		const candidate = nowSec - match.clock;
+		if (vkPeriod !== match.period || virtualKickoff == null) {
+			virtualKickoff = candidate; // new period (or first sighting) → re-base
+			vkPeriod = match.period;
+		} else {
+			virtualKickoff = Math.min(virtualKickoff, candidate); // frozen clock drifts candidate LATER — keep earliest
+		}
+	}
 	return {
 		home: { id: match.home.id, score: match.home.score },
 		away: { id: match.away.id, score: match.away.score },
 		state: match.state,
 		halftimeSent: (prev?.halftimeSent ?? false) || fired.some((e) => e.type === "halftime"),
+		virtualKickoff,
+		vkPeriod,
 	};
 }
 
