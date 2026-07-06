@@ -35,6 +35,33 @@ function lastScorer(m: Match): string | undefined {
 	return undefined;
 }
 
+/** Cap for per-side scorer lists in content-state — keeps the APNs 4KB envelope safe and the
+ *  lock-screen card bounded. NWSL sides rarely exceed 4 goals; when one does, the 4th line
+ *  becomes an overflow marker ("+2 more"). */
+const SCORERS_PER_SIDE_CAP = 4;
+
+/** One side's scorer lines ("C. Hutton 5'"), chronological, capped. Unattributed goals (ESPN
+ *  gave no scorer) are skipped — never fabricated. Undefined when empty (compact() omits). */
+function sideScorers(m: Match, teamId: string): string[] | undefined {
+	const lines: string[] = [];
+	for (const p of m.plays) {
+		if (p.teamId !== teamId || !p.scorer) continue;
+		lines.push(p.minute != null ? `${p.scorer} ${p.minute}'` : p.scorer);
+	}
+	if (lines.length === 0) return undefined;
+	if (lines.length > SCORERS_PER_SIDE_CAP) {
+		const overflow = lines.length - (SCORERS_PER_SIDE_CAP - 1);
+		return [...lines.slice(0, SCORERS_PER_SIDE_CAP - 1), `+${overflow} more`];
+	}
+	return lines;
+}
+
+/** One side's red-card count; undefined when 0 (compact() omits). */
+function sideReds(m: Match, teamId: string): number | undefined {
+	const n = m.cards.filter((c) => c.teamId === teamId).length;
+	return n > 0 ? n : undefined;
+}
+
 /** The current Live Activity content-state for a live/finished match (used for UPDATE / END).
  *  `virtualKickoff` (from StoredState) is the MONOTONIC anchor: ESPN freezes `status.clock` during
  *  stoppage, so re-basing `now − clock` per push snapped the widget clock back to 45:00 on every
@@ -51,6 +78,10 @@ export function contentStateFromMatch(m: Match, virtualKickoff?: number): LiveCo
 		clockStartEpoch: running ? (virtualKickoff ?? nowSec - m.clock) : undefined,
 		staticLabel,
 		lastScorer: lastScorer(m),
+		homeScorers: sideScorers(m, m.home.id),
+		awayScorers: sideScorers(m, m.away.id),
+		homeRedCards: sideReds(m, m.home.id),
+		awayRedCards: sideReds(m, m.away.id),
 	};
 }
 

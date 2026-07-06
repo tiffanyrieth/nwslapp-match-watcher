@@ -15,15 +15,24 @@ import { ApnsConfig, ApnsResult, apnsJwt } from "./apns";
 
 export type LivePhase = "pre" | "live" | "halftime" | "extraTime" | "penalties" | "fulltime";
 
-/** Mirrors Swift MatchActivityAttributes.ContentState. */
+/** Mirrors Swift MatchActivityAttributes.ContentState. New keys are ADDITIVE-OPTIONAL both
+ *  ways: old app builds ignore unknown JSON keys (synthesized Codable), and the Swift fields
+ *  are Optional so old payloads still decode — the two structs may only grow in lock-step. */
 export interface LiveContentState {
 	homeScore: number;
 	awayScore: number;
 	phase: LivePhase;
 	clockStartEpoch?: number; // unix seconds = now − elapsedSeconds; omit when the clock is paused
 	staticLabel?: string; // "3:00 PM" | "HT" | "FT" — shown when not ticking
-	lastScorer?: string;
+	lastScorer?: string; // legacy single line — kept so pre-scorer-columns builds keep rendering
 	broadcast?: string;
+	/** Per-side scorer lines ("C. Hutton 5'"), chronological, capped at 4 (+N overflow marker) —
+	 *  the widget renders these under each team, FIFA/Reddit-match-thread style. Omitted at 0-0. */
+	homeScorers?: string[];
+	awayScorers?: string[];
+	/** Per-side RED-card counts (yellows excluded by design). Omitted when 0. */
+	homeRedCards?: number;
+	awayRedCards?: number;
 }
 
 /** Mirrors Swift MatchActivityAttributes (the static, set-once fields). */

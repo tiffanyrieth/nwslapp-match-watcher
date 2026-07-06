@@ -22,6 +22,7 @@ const match = (over: Partial<Match> = {}): Match => ({
 	period: 1,
 	clock: 600,
 	plays: [],
+	cards: [],
 	...over,
 });
 

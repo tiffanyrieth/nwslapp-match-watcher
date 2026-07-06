@@ -24,6 +24,7 @@ const snapshot = (over: Partial<Match> = {}): Match => ({
 	period: 1,
 	clock: 600,
 	plays: [],
+	cards: [],
 	...over,
 });
 
@@ -74,6 +75,28 @@ test("second-half stoppage (clock frozen at 5400) keeps the re-based anchor — 
 	s = nextState(s, snapshot({ statusName: "STATUS_SECOND_HALF", period: 2, clock: 5400 }), [], anchor + 5580);
 	assert.equal(s.virtualKickoff, anchor);
 	assert.equal(shown(s, anchor + 5580), 5580); // 93:00, ticking through stoppage
+});
+
+test("RATCHET GUARD: a same-period glitch tick with an inflated clock must not move the anchor", () => {
+	let s = nextState(null, snapshot({ clock: 600 }), [], KICKOFF + 600); // anchor = KICKOFF
+	// Glitch: one tick reports clock 1500 while only 700s have really elapsed → candidate is
+	// 800s EARLIER than the anchor. Math.min alone would adopt it and the widget would jump
+	// forward ~13 min for the rest of the match (observed live 7/5 at a goal). Must be rejected.
+	s = nextState(s, snapshot({ clock: 1500 }), [], KICKOFF + 700);
+	assert.equal(s.virtualKickoff, KICKOFF, "glitch candidate must be rejected");
+	// A small legitimate correction (ESPN clock 60s ahead of our anchor's view) IS adopted.
+	s = nextState(s, snapshot({ clock: 1060 }), [], KICKOFF + 1000);
+	assert.equal(s.virtualKickoff, KICKOFF - 60, "small correction within tolerance is adopted");
+});
+
+test("RATCHET GUARD: the period-change re-base is exempt (big jumps are legitimate there)", () => {
+	let s = nextState(null, snapshot({ clock: 600 }), [], KICKOFF + 600);
+	s = nextState(s, snapshot({ statusName: "STATUS_HALFTIME", period: 2, clock: 2700 }), [], KICKOFF + 2900);
+	// Second-half restart: the anchor legitimately moves LATER by the ~15-min break — the
+	// period-change branch must take the candidate wholesale, tolerance not applied.
+	const restartWall = KICKOFF + 3660;
+	s = nextState(s, snapshot({ statusName: "STATUS_SECOND_HALF", period: 2, clock: 2760 }), [], restartWall);
+	assert.equal(s.virtualKickoff, restartWall - 2760);
 });
 
 test("clockRunning: live halves run; halftime/shootout/post do not", () => {

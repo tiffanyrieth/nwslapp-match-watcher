@@ -26,6 +26,7 @@ const withScores = (h: number, a: number, over: Partial<Match> = {}): Match => (
 	period: 2,
 	clock: 4860,
 	plays: [],
+	cards: [],
 	...over,
 });
 
