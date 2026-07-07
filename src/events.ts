@@ -39,9 +39,15 @@ export interface ScoreboardEvent {
 	}>;
 }
 
-/** A `competitions[].details` entry — we read only the scoring plays. */
+/** A `competitions[].details` entry — scoring plays + cards. Card entries carry EXPLICIT
+ *  booleans (live-verified 2026-07-05: `redCard`/`yellowCard`/`penaltyKick`/`ownGoal` all
+ *  present on every card entry, plus `type:{id,text}`) — detection keys on the BOOLEANS,
+ *  never on text matching (the build-25 lesson: `contains("red")` matched "scoRED"). */
 interface ScoreboardDetail {
 	scoringPlay?: boolean;
+	redCard?: boolean;
+	yellowCard?: boolean;
+	type?: { id?: string; text?: string };
 	clock?: { displayValue?: string }; // e.g. "67'"
 	team?: { id?: string };
 	athletesInvolved?: Array<{ displayName?: string; shortName?: string }>;
@@ -81,6 +87,10 @@ export interface Match {
 	clock: number;
 	/** Scoring plays from the scoreboard details, in document order. */
 	plays: ScoringPlay[];
+	/** RED cards from the scoreboard details (yellows deliberately ignored — owner decision,
+	 *  matches FIFA practice: yellows are per-game noise, reds change the match). Same reduced
+	 *  shape as a scoring play: teamId + player + minute. */
+	cards: ScoringPlay[];
 	/** Venue name ("Audi Field") + broadcast label ("Victory+") — for the kickoff body. Best-effort. */
 	venue?: string;
 	broadcast?: string;
@@ -92,15 +102,24 @@ export interface StoredState {
 	away: { id: string; score: number };
 	state: string;
 	halftimeSent: boolean;
+	/** Per-side RED-card counts already seen — the fire-once ledger for "redcard" events
+	 *  (a side can collect more than one, so it's a count, not a flag). ABSENT (pre-existing
+	 *  KV rows from before this shipped) means "unknown": detectEvents only BASELINES then —
+	 *  a mid-match deploy must not late-fire a card that happened before the deploy. */
+	redCards?: { home: number; away: number };
 	/** Monotonic virtual kickoff (epoch sec) for the V2 widget clock: ESPN FREEZES `status.clock`
 	 *  at 2700/5400 during stoppage, so re-basing `now − clock` on every push made the widget clock
 	 *  jump back to 45:00 each resync. We keep the EARLIEST virtual kickoff seen within a period
-	 *  (min), so projected elapsed never rewinds; a period change re-bases (halftime pause). */
+	 *  (min), so projected elapsed never rewinds; a period change re-bases (halftime pause).
+	 *  ⚠️ Reconcile ONLY while the clock is RUNNING (see clockRunning): ESPN advances `period` → 2
+	 *  at the START of the halftime break (state stays "in", clock frozen at 2700), so reconciling
+	 *  through the break re-based the anchor at the break's start and Math.min then pinned it there —
+	 *  the ~15-min interval leaked into the widget clock (second half read 1:01+ instead of 46:00). */
 	virtualKickoff?: number;
 	vkPeriod?: number;
 }
 
-export type MatchEventType = "kickoff" | "goal" | "halftime" | "fulltime" | "correction" | "lineup";
+export type MatchEventType = "kickoff" | "goal" | "halftime" | "fulltime" | "correction" | "lineup" | "redcard";
 
 /** A detected event, carrying everything to find followers + compose the push. */
 export interface MatchEvent {
@@ -163,6 +182,32 @@ function parsePlays(details?: ScoreboardDetail[]): ScoringPlay[] {
 	return plays;
 }
 
+/** The scoreboard's RED cards, reduced like parsePlays. Detection = `redCard === true`, the
+ *  explicit boolean (never text). Belt: a non-goal entry whose `type.text` LOOKS card-ish but
+ *  whose booleans are both false is an ESPN representation we haven't seen (e.g. a possible
+ *  second-yellow shape) — log it loudly so it surfaces on the first real occurrence instead of
+ *  being silently dropped. (Exact-word check, so "Scored Penalty" can't false-positive.) */
+export function parseCards(details?: ScoreboardDetail[]): ScoringPlay[] {
+	const cards: ScoringPlay[] = [];
+	for (const d of details ?? []) {
+		if (d.scoringPlay || !d.team?.id) continue;
+		const text = d.type?.text ?? "";
+		if (d.redCard !== true) {
+			if (d.yellowCard !== true && /\bcard\b/i.test(text)) {
+				console.log(`cards: unrecognized card shape — type=${JSON.stringify(d.type)} booleans red=${d.redCard} yellow=${d.yellowCard}`);
+			}
+			continue;
+		}
+		const athlete = d.athletesInvolved?.[0];
+		cards.push({
+			teamId: d.team.id,
+			scorer: athlete?.shortName ?? athlete?.displayName,
+			minute: parseMinute(d.clock?.displayValue),
+		});
+	}
+	return cards;
+}
+
 /**
  * Reduce an event to a Match, or null if it isn't usable. Returns matches that are
  * live ("in") or just-ended ("post") and have both team ids (we key followers by
@@ -198,21 +243,61 @@ export function parseMatch(event: ScoreboardEvent): Match | null {
 		period: status?.period ?? 0,
 		clock: status?.clock ?? 0,
 		plays: parsePlays(competition?.details),
+		cards: parseCards(competition?.details),
 		venue,
 		broadcast,
 	};
 }
+
+/** Per-side red-card counts for `match` — the values persisted to StoredState.redCards. */
+function redCardCounts(match: Match): { home: number; away: number } {
+	let home = 0;
+	let away = 0;
+	for (const c of match.cards) {
+		if (c.teamId === match.home.id) home++;
+		else if (c.teamId === match.away.id) away++;
+	}
+	return { home, away };
+}
+
+/** The redCards ledger to persist after this poll: always the CURRENT counts (recording is
+ *  unconditional; only FIRING is gated on a known prior — see detectEvents). */
+function nextRedCards(_prev: StoredState | null, match: Match): { home: number; away: number } {
+	return redCardCounts(match);
+}
+
+/** True while ESPN's clock is actually ADVANCING — in-progress and not paused at halftime or a
+ *  shootout. Reconciling the virtual kickoff during a pause is what leaked the halftime break into
+ *  the widget clock (see StoredState.virtualKickoff): the pause must leave the anchor untouched so
+ *  the period-change re-base fires at the REAL second-half kickoff and absorbs the break. */
+export function clockRunning(m: Match): boolean {
+	if (m.state !== "in") return false;
+	const n = m.statusName.toUpperCase();
+	return !n.includes("HALFTIME") && !n.includes("SHOOTOUT") && !n.includes("PENALT");
+}
+
+/** How far EARLIER (sec) a same-period candidate may move the anchor before we call it a feed
+ *  glitch. `Math.min` is a one-way RATCHET: one tick with an inflated `status.clock` (observed
+ *  live 7/5 — the widget clock jumped forward when a goal was processed) would move the anchor
+ *  earlier and it could never heal. Small early moves (ESPN correcting a clock that lagged a
+ *  little) are legitimate; a jump past this tolerance is not. Period changes are exempt — the
+ *  legitimate big re-base (absorbing the halftime break) goes through the re-base branch. */
+const VK_RATCHET_TOLERANCE_SEC = 120;
 
 /** The KV state to persist for `match` after this poll (carrying the halftime flag + the monotonic
  *  virtual kickoff — see StoredState.virtualKickoff). `nowSec` is injected so this stays pure. */
 export function nextState(prev: StoredState | null, match: Match, fired: MatchEvent[], nowSec?: number): StoredState {
 	let virtualKickoff = prev?.virtualKickoff;
 	let vkPeriod = prev?.vkPeriod;
-	if (nowSec != null && match.state === "in") {
+	if (nowSec != null && clockRunning(match)) {
 		const candidate = nowSec - match.clock;
 		if (vkPeriod !== match.period || virtualKickoff == null) {
 			virtualKickoff = candidate; // new period (or first sighting) → re-base
 			vkPeriod = match.period;
+		} else if (candidate < virtualKickoff - VK_RATCHET_TOLERANCE_SEC) {
+			// Glitch clamp: this tick's clock is implausibly AHEAD (candidate far earlier than the
+			// anchor). Adopting it would jump the widget clock forward for the rest of the match.
+			// Keep the anchor; a real feed correction re-presents within tolerance next tick.
 		} else {
 			virtualKickoff = Math.min(virtualKickoff, candidate); // frozen clock drifts candidate LATER — keep earliest
 		}
@@ -222,6 +307,7 @@ export function nextState(prev: StoredState | null, match: Match, fired: MatchEv
 		away: { id: match.away.id, score: match.away.score },
 		state: match.state,
 		halftimeSent: (prev?.halftimeSent ?? false) || fired.some((e) => e.type === "halftime"),
+		redCards: nextRedCards(prev, match),
 		virtualKickoff,
 		vkPeriod,
 	};
@@ -368,6 +454,33 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 				minute: play?.minute,
 				scorer: play?.scorer,
 			});
+		}
+	}
+
+	// Red cards — a side's red count rose past the stored ledger. Gated on prev.redCards being
+	// PRESENT: a pre-existing KV row (from before red cards shipped) has no ledger, and firing
+	// against an assumed 0 would late-push a card from before the deploy. That first post-deploy
+	// tick records the counts (nextState) and detection starts clean from the next tick.
+	if (prev?.redCards) {
+		const counts = redCardCounts(match);
+		for (const side of ["home", "away"] as const) {
+			if (counts[side] > prev.redCards[side]) {
+				const club = side === "home" ? match.home : match.away;
+				// Attribute the newest red for that side, best-effort (mirrors latestPlayFor).
+				let play: ScoringPlay | undefined;
+				for (const c of match.cards) if (c.teamId === club.id) play = c;
+				const who = play?.scorer ? (play.minute != null ? `${play.scorer} ${play.minute}'` : play.scorer) : undefined;
+				events.push({
+					...base,
+					type: "redcard",
+					prefColumn: "goals", // rides the Goals toggle (owner decision; precedent = VAR corrections)
+					title: `Red card — ${club.name}`,
+					subtitle: who ? `${scoreline(match)} · ${who}` : scoreline(match),
+					scoringSide: side, // carded club's crest attaches
+					minute: play?.minute,
+					scorer: play?.scorer,
+				});
+			}
 		}
 	}
 
