@@ -49,7 +49,7 @@ import { buildStartAps, endLiveActivity, liveTopic, startLiveActivity, updateLiv
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
 import { buildMessages, collapseIdFor, enqueueFanout, type FanoutMessage } from "./fanout";
 import { drainMessage } from "./drain";
-import { broadcastEnd, broadcastUpdate, createChannelSigned, deleteChannel, listChannels } from "./broadcast";
+import { broadcastEnd, broadcastUpdate, createChannel, createChannelSigned, deleteChannel, listChannels } from "./broadcast";
 
 export interface Env {
 	/** KV namespace holding per-match last-known scores (key `match:{eventId}`). */
@@ -178,6 +178,15 @@ function apnsConfig(env: Env): ApnsConfig {
 
 function supabaseConfig(env: Env): SupabaseConfig {
 	return { url: env.SUPABASE_URL, serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY };
+}
+
+// TEST-ONLY: route a single test call to the SANDBOX APNs host (for a USB/Xcode debug build, whose token
+// is a sandbox token the production host 400s). Swaps ONLY this call's host — never the global config —
+// so it can't prune real prod tokens or flip the cron. broadcast.ts's manageHostPort keys off the host,
+// so a sandbox cfg also targets the sandbox channel-management host automatically.
+function testApnsConfig(env: Env, sandbox: boolean): ApnsConfig {
+	const cfg = apnsConfig(env);
+	return sandbox ? { ...cfg, host: "api.sandbox.push.apple.com" } : cfg;
 }
 
 /** Producer: chunk an event's follower tokens into fan-out messages and enqueue (V1 alert — club, NT,
@@ -320,6 +329,13 @@ export default {
 		// from Workers → flip broadcast.ts's manageChannelRequest seam to the Supabase Edge Function.
 		if (request.method === "POST" && url.pathname === "/probe-channel") {
 			return handleProbeChannel(request, env);
+		}
+
+		// DEBUG: drive the REAL V2 broadcast path on demand (no live match needed) — create a channel,
+		// push-to-start with input-push-channel, then broadcast update/end. `sandbox:true` targets the
+		// sandbox host for a USB debug build. See handleTestBroadcast.
+		if (request.method === "POST" && url.pathname === "/test-broadcast") {
+			return handleTestBroadcast(request, env);
 		}
 
 		return new Response("Not found.", { status: 404 });
@@ -822,6 +838,97 @@ async function handleProbeChannel(request: Request, env: Env): Promise<Response>
 }
 
 /**
+ * DEBUG: drive the REAL V2 Broadcast Channel path on demand (no live match needed) — the on-device
+ * verification for the broadcast architecture. Guarded by the trigger secret.
+ * Body: { mode:"start"|"update"|"end", sandbox?, token?, matchId?, h?, a?, hs?, as?, phase?, min?, sc?, isNational? }.
+ *   start  → create a channel, store it under la-chan:{matchId}, push-to-start to the device's start
+ *            token(s) carrying input-push-channel (iOS 18 auto-subscribes the Activity to the channel).
+ *   update → broadcast a content-state to the channel (Apple fans out to every subscribed Activity).
+ *   end    → broadcast an end + delete the channel + clean KV.
+ * Token targeting mirrors /test-activity: `token` present → that device's push-to-start token; omitted →
+ * all registered start tokens. `sandbox:true` targets the sandbox host + sandbox channel (USB debug build).
+ * Defaults to a NATIONAL match (USA vs CAN → flag render); pass isNational:false + h/a club abbrs for a club.
+ * On-device sequence: start → wait for the card to appear → update (score) → update (HT) → end.
+ */
+async function handleTestBroadcast(request: Request, env: Env): Promise<Response> {
+	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
+		return new Response("Forbidden.", { status: 403 });
+	}
+	let p: {
+		mode?: "start" | "update" | "end";
+		sandbox?: boolean;
+		token?: string;
+		matchId?: string;
+		h?: string;
+		a?: string;
+		hs?: number;
+		as?: number;
+		phase?: LivePhase;
+		min?: number;
+		sc?: string;
+		isNational?: boolean;
+	};
+	try {
+		p = (await request.json()) as typeof p;
+	} catch {
+		return new Response("Bad JSON.", { status: 400 });
+	}
+	const apns = testApnsConfig(env, p.sandbox === true);
+	const jwt = await apnsJwt(apns);
+	const sb = supabaseConfig(env);
+	const nowSec = Math.floor(Date.now() / 1000);
+	const mode = p.mode ?? "start";
+	const matchId = p.matchId ?? "test-broadcast";
+	const chanKey = channelKey(matchId);
+	const phase: LivePhase = p.phase ?? "live";
+	const running = phase === "live" || phase === "extraTime";
+	const state: LiveContentState = {
+		homeScore: p.hs ?? 0,
+		awayScore: p.as ?? 0,
+		phase,
+		clockStartEpoch: running ? nowSec - (p.min ?? 1) * 60 : undefined,
+		staticLabel: phase === "pre" ? "3:00 PM" : phase === "halftime" ? "HT" : phase === "fulltime" ? "FT" : undefined,
+		lastScorer: p.sc,
+		broadcast: "Paramount+",
+	};
+	const json = (body: unknown, status: number): Response =>
+		new Response(JSON.stringify(body, null, 2), { status, headers: { "Content-Type": "application/json" } });
+
+	if (mode === "start") {
+		const created = await createChannel(apns, jwt);
+		if (!created.ok || !created.channelId) {
+			return json({ mode, matchId, host: apns.host, error: `channel create failed: ${created.status} ${created.reason ?? ""}` }, 502);
+		}
+		await env.MATCH_STATE.put(chanKey, created.channelId, { expirationTtl: MATCH_STATE_TTL });
+		const national = p.isNational !== false; // default true — this route is primarily the flag test
+		const attrs = attributesFor(matchId, p.h ?? "USA", p.a ?? "CAN", national ? "International" : "NWSL", national);
+		const startAlert = { title: `${p.h ?? "USA"} vs ${p.a ?? "CAN"}`, body: "Live match card is on your lock screen.", sound: "" };
+		let tokens: string[];
+		try {
+			tokens = p.token ? [p.token] : await allStartTokens(sb);
+		} catch (err) {
+			return json({ mode, matchId, error: `start-token resolution failed: ${String(err)}` }, 502);
+		}
+		if (tokens.length === 0) return json({ mode, matchId, channelId: created.channelId, note: "No push-to-start tokens registered." }, 502);
+		const results = await Promise.all(tokens.map((t) => startLiveActivity(t, attrs, state, jwt, apns, undefined, startAlert, created.channelId)));
+		return json({ mode, matchId, host: apns.host, channelId: created.channelId, tokenCount: tokens.length, okCount: results.filter((r) => r.ok).length, results }, results.some((r) => r.ok) ? 200 : 502);
+	}
+
+	const channelId = await env.MATCH_STATE.get(chanKey);
+	if (!channelId) return json({ mode, matchId, error: "no channel for this matchId — run mode=start first" }, 409);
+
+	if (mode === "update") {
+		const r = await broadcastUpdate(apns, jwt, channelId, state);
+		return json({ mode, matchId, host: apns.host, channelId, broadcast: r }, r.ok ? 200 : 502);
+	}
+	// end
+	const r = await broadcastEnd(apns, jwt, channelId, state);
+	await deleteChannel(apns, jwt, channelId);
+	await env.MATCH_STATE.delete(chanKey);
+	return json({ mode, matchId, host: apns.host, channelId, broadcast: r, channelDeleted: true }, r.ok ? 200 : 502);
+}
+
+/**
  * Manual trigger: send a synthetic push to one device token, so the full RICH look
  * (NSE wakes → downloads the match card → attaches it) can be verified on a real
  * device before matches resume. A notification's appearance is purely a function of
@@ -844,13 +951,15 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 		eventID?: string;
 		event?: string;
 		imageUrl?: string;
+		/** Route to the SANDBOX APNs host for a USB/Xcode debug build (its token is a sandbox token). */
+		sandbox?: boolean;
 	};
 	try {
 		payload = (await request.json()) as typeof payload;
 	} catch {
 		return new Response("Bad JSON.", { status: 400 });
 	}
-	const apns = apnsConfig(env);
+	const apns = testApnsConfig(env, payload.sandbox === true);
 	const jwt = await apnsJwt(apns);
 	const eventID = payload.eventID ?? "401853925";
 	const event = payload.event ?? "goal";
