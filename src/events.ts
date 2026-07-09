@@ -119,6 +119,26 @@ export interface StoredState {
 	vkPeriod?: number;
 }
 
+/** True when two stored states are meaningfully identical — used to skip re-writing the SAME state to KV
+ *  every per-minute tick (the vast majority of a live match: score/clock-anchor unchanged). Compares every
+ *  persisted field; note StoredState carries NO ticking clock (the clock is device-side), so a quiet minute
+ *  of play produces an identical state and no write. `undefined === undefined` for the optional fields, so a
+ *  legacy row (no redCards/virtualKickoff) upgrading to a defined value is correctly seen as a CHANGE. */
+export function sameStoredState(a: StoredState, b: StoredState): boolean {
+	return (
+		a.home.id === b.home.id &&
+		a.home.score === b.home.score &&
+		a.away.id === b.away.id &&
+		a.away.score === b.away.score &&
+		a.state === b.state &&
+		a.halftimeSent === b.halftimeSent &&
+		a.redCards?.home === b.redCards?.home &&
+		a.redCards?.away === b.redCards?.away &&
+		a.virtualKickoff === b.virtualKickoff &&
+		a.vkPeriod === b.vkPeriod
+	);
+}
+
 export type MatchEventType = "kickoff" | "goal" | "halftime" | "fulltime" | "correction" | "lineup" | "redcard";
 
 /** A detected event, carrying everything to find followers + compose the push. */

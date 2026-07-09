@@ -32,6 +32,7 @@ import {
 	lineupsPublished,
 	nextState,
 	parseMatch,
+	sameStoredState,
 	toPayload,
 	type Match,
 	type MatchEvent,
@@ -114,6 +115,13 @@ const NT_LEAGUES = [
 const ntKeys = (ev: MatchEvent): string[] =>
 	[ev.homeAbbr, ev.awayAbbr].filter((a) => a).map((a) => `nt:${a}`);
 const MATCH_STATE_TTL = 21600; // 6h — auto-expires a match's KV entry after it ends.
+
+// Fan-out early-warning threshold. Cloudflare's free plan caps a single cron invocation at 50 external
+// subrequests; each APNs push is one, plus ~8+ feed fetches per tick — so a single event with more than
+// ~40 follower tokens starts dropping the overflow (see docs/push-fanout-scaling.md in the app repo). We
+// can't FIX that here (it needs the Queues / Broadcast-Channels redesign) but we log LOUD when we cross the
+// line, turning a silent per-tick cap failure into a visible signal that it's time to build that fan-out.
+const FANOUT_BUDGET = 40;
 
 // VAR correction debounce: a score decrease isn't fired immediately. We wait, then re-poll a FRESH
 // scoreboard; only a persisting decrease fires (a reverted score was a transient ESPN glitch). 12s sits
@@ -269,6 +277,10 @@ async function runWatch(env: Env): Promise<void> {
 				return;
 			}
 			if (tokens.length === 0) return;
+			if (tokens.length > FANOUT_BUDGET) {
+				// NO SILENT FAILURES: past this many tokens the free-tier subrequest cap drops the overflow.
+				console.log(`[watcher] fanoutBudgetExceeded ${ev.type} team=${ev.teamIds[0]} n=${tokens.length} budget=${FANOUT_BUDGET} — see docs/push-fanout-scaling.md`);
+			}
 
 			jwt ??= await apnsJwt(apns);
 			const payload = toPayload(ev, env.CARD_PUBLIC_URL);
@@ -316,7 +328,10 @@ async function runWatch(env: Env): Promise<void> {
 
 		if (effectiveMatch.state === "post") {
 			await env.MATCH_STATE.delete(key);
-		} else {
+		} else if (!prev || !sameStoredState(prev, newState)) {
+			// Write ONLY when something actually changed (goal/HT/FT/red/period/anchor). A quiet minute of
+			// play produces an identical state — skipping it cuts a live match from ~120 writes to ~10,
+			// which is the free-tier KV-write headroom that matters on busy match days / international windows.
 			await env.MATCH_STATE.put(key, JSON.stringify(newState), {
 				expirationTtl: MATCH_STATE_TTL,
 			});
@@ -366,7 +381,11 @@ async function runWatch(env: Env): Promise<void> {
 			}
 
 			if (match.state === "post") await env.MATCH_STATE.delete(key);
-			else await env.MATCH_STATE.put(key, JSON.stringify(nextState(prev, match, detected)), { expirationTtl: MATCH_STATE_TTL });
+			else {
+				const ntNext = nextState(prev, match, detected);
+				// Same change-guard as the club pass — skip re-writing an identical NT state every tick.
+				if (!prev || !sameStoredState(prev, ntNext)) await env.MATCH_STATE.put(key, JSON.stringify(ntNext), { expirationTtl: MATCH_STATE_TTL });
+			}
 		}
 	}
 
