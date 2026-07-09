@@ -20,6 +20,26 @@
 			"id": "c00d44c4505844108c91f15282a4cfae",
 		},
 	],
+	// Push fan-out queue (docs/push-fanout-scaling.md). The cron (producer) chunks follower tokens ~40
+	// per message and enqueues; the consumer below drains one message per invocation, each with its OWN
+	// fresh 50-external-subrequest budget, so a big fixture can't overflow the cap. Free plan since
+	// 2026-02-04 (10k ops/day). Create with `wrangler queues create nwslapp-push` + `…-push-dlq`.
+	"queues": {
+		"producers": [
+			{ "binding": "PUSH_QUEUE", "queue": "nwslapp-push" },
+		],
+		"consumers": [
+			{
+				"queue": "nwslapp-push",
+				// One message per invocation = ≤40 APNs POSTs against a fresh 50-external budget.
+				"max_batch_size": 1,
+				"max_batch_timeout": 0,
+				"max_retries": 3,
+				// Exhausted messages land here instead of vanishing (NO SILENT FAILURES).
+				"dead_letter_queue": "nwslapp-push-dlq",
+			},
+		],
+	},
 	// Service binding to the sibling proxy. A plain fetch to the proxy's workers.dev URL
 	// fails with Cloudflare error 1042 (same-account Worker→Worker over workers.dev is
 	// not allowed); the binding routes subrequests in-process. Used for the scoreboard

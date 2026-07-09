@@ -85,8 +85,15 @@ export function contentStateFromMatch(m: Match, virtualKickoff?: number): LiveCo
 	};
 }
 
-/** Static attributes for a match (set once at START). competition is NWSL until the watcher polls others. */
-export function attributesFor(matchId: string, homeAbbr: string, awayAbbr: string, competition = "NWSL"): LiveAttributes {
+/** Static attributes for a match (set once at START). competition is NWSL until the watcher polls others.
+ *  `isNational` → the widget renders FIFA-code flags instead of club crests (USWNT V2). */
+export function attributesFor(
+	matchId: string,
+	homeAbbr: string,
+	awayAbbr: string,
+	competition = "NWSL",
+	isNational = false,
+): LiveAttributes {
 	return {
 		matchId,
 		homeAbbr,
@@ -94,6 +101,7 @@ export function attributesFor(matchId: string, homeAbbr: string, awayAbbr: strin
 		homeColorHex: colorHex(homeAbbr),
 		awayColorHex: colorHex(awayAbbr),
 		competition,
+		...(isNational ? { isNational: true } : {}),
 	};
 }
 

@@ -44,9 +44,12 @@ import {
 // so its cold-start module-eval never touches this cron's per-tick CPU budget — the fix for the
 // "Exceeded CPU Time Limits" errors. This worker only builds card URLs (CARD_PUBLIC_URL) and
 // 302-redirects any /card request that lands here (late-delivered pushes carry the old origin).
-import { activityTokensForMatch, allDeviceTokens, allStartTokens, pruneDeadTokens, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
-import { endLiveActivity, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
+import { activityTokensForMatch, allDeviceTokens, allStartTokens, startTokensForCompetition, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { buildStartAps, endLiveActivity, liveTopic, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
+import { buildMessages, collapseIdFor, enqueueFanout, type FanoutMessage } from "./fanout";
+import { drainMessage } from "./drain";
+import { broadcastEnd, broadcastUpdate, createChannelSigned, deleteChannel, listChannels } from "./broadcast";
 
 export interface Env {
 	/** KV namespace holding per-match last-known scores (key `match:{eventId}`). */
@@ -72,6 +75,10 @@ export interface Env {
 	 *  not a workers.dev fetch: same-account Worker→Worker over the public URL fails with
 	 *  Cloudflare error 1042. The URL host is ignored by the binding; only the path matters. */
 	PROXY: Fetcher;
+
+	/** Push fan-out queue (producer). The cron enqueues chunked follower tokens; the consumer (queue()
+	 *  handler) drains one message per invocation with its own fresh subrequest budget. */
+	PUSH_QUEUE: Queue<FanoutMessage>;
 
 	/** Shared secret guarding the manual /test-push route. */
 	MANUAL_TRIGGER_SECRET: string;
@@ -128,6 +135,12 @@ const ntKeys = (ev: MatchEvent): string[] =>
 	[ev.homeAbbr, ev.awayAbbr].filter((a) => a).map((a) => `nt:${a}`);
 const MATCH_STATE_TTL = 21600; // 6h — auto-expires a match's KV entry after it ends.
 
+// USWNT is the one national team getting V2 Live Activities for now: the per-match-channel economics make
+// it nearly free (one channel + ~10 flat broadcasts/match at any audience size). Other NT codes stay V1
+// only — extending later is a config change, not new machinery. Gated on this competition follow key.
+const USWNT_CODE = "USA";
+const USWNT_FOLLOW_KEY = "nt:USA";
+
 // Fan-out early-warning threshold. Cloudflare's free plan caps a single cron invocation at 50 external
 // subrequests; each APNs push is one, plus ~8+ feed fetches per tick — so a single event with more than
 // ~40 follower tokens starts dropping the overflow (see docs/push-fanout-scaling.md in the app repo). We
@@ -167,6 +180,108 @@ function supabaseConfig(env: Env): SupabaseConfig {
 	return { url: env.SUPABASE_URL, serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY };
 }
 
+/** Producer: chunk an event's follower tokens into fan-out messages and enqueue (V1 alert — club, NT,
+ *  and lineup all share this shape; they only differ in how the tokens were looked up). A binding call
+ *  on the internal budget, so it never touches the 50-external APNs cap. Delivery + prune happen in the
+ *  queue consumer. Carries a deterministic apns-collapse-id so an at-least-once redelivery de-dupes. */
+async function enqueueV1(env: Env, ev: MatchEvent, tokens: string[]): Promise<number> {
+	if (tokens.length === 0) return 0;
+	const messages = buildMessages(
+		{
+			kind: "v1",
+			payload: toPayload(ev, env.CARD_PUBLIC_URL),
+			apnsTopic: env.APNS_BUNDLE_ID,
+			apnsPushType: "alert",
+			collapseId: collapseIdFor(ev),
+			pruneTable: "device_tokens",
+			pruneColumn: "token",
+			label: `${ev.type} "${ev.title}"`,
+		},
+		tokens,
+	);
+	await enqueueFanout(env.PUSH_QUEUE, messages);
+	console.log(`[watcher] enqueued ${ev.type} "${ev.title}": ${tokens.length} token(s) → ${messages.length} msg(s)`);
+	return messages.length;
+}
+
+/** Producer: chunk push-to-start tokens into fan-out messages and enqueue. The start push is the ONE
+ *  per-device Live Activity send per match; on iOS 18 its `input-push-channel` auto-subscribes the
+ *  created Activity to the match's broadcast channel, so every later update is a single broadcast (no
+ *  per-device fan-out). No collapse-id (a start isn't a match event). */
+async function enqueueLaStart(
+	env: Env,
+	apns: ApnsConfig,
+	attrs: ReturnType<typeof attributesFor>,
+	state: LiveContentState,
+	alert: { title: string; body: string; sound?: string },
+	tokens: string[],
+	inputPushChannel?: string,
+): Promise<void> {
+	if (tokens.length === 0) return;
+	const messages = buildMessages(
+		{
+			kind: "la-start",
+			payload: buildStartAps(attrs, state, undefined, alert, inputPushChannel),
+			apnsTopic: liveTopic(apns),
+			apnsPushType: "liveactivity",
+			pruneTable: "live_activity_start_tokens",
+			pruneColumn: "token",
+			label: `LA start ${attrs.homeAbbr} vs ${attrs.awayAbbr}`,
+		},
+		tokens,
+	);
+	await enqueueFanout(env.PUSH_QUEUE, messages);
+	console.log(`[watcher] enqueued LA start ${attrs.homeAbbr} vs ${attrs.awayAbbr}: ${tokens.length} → ${messages.length} msg(s)`);
+}
+
+// V2 broadcast channel KV keys. `la-chan:{matchId}` → the match's Apple channel id (one per match, created
+// pre-kickoff, deleted at full time). `la-chan-sweep` → last orphan-sweep timestamp.
+const channelKey = (matchId: string): string => `la-chan:${matchId}`;
+const CHANNEL_SWEEP_KEY = "la-chan-sweep";
+const CHANNEL_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/** Create-once the broadcast channel for a match (KV-deduped) and return its id. Returns undefined if
+ *  creation fails — the LA start still fires WITHOUT a channel (graceful: those Activities just won't get
+ *  broadcast updates; logged LOUD so it's never a silent gap). iOS 18 devices put the returned id in the
+ *  start payload's `input-push-channel` to auto-subscribe. */
+async function ensureMatchChannel(env: Env, apns: ApnsConfig, matchId: string): Promise<string | undefined> {
+	const key = channelKey(matchId);
+	const existing = await env.MATCH_STATE.get(key);
+	if (existing) return existing;
+	const result = await createChannelSigned(apns);
+	if (!result.ok || !result.channelId) {
+		console.log(`[watcher] channel create FAILED (${matchId}): ${result.status} ${result.reason ?? ""} — LA start will fire channel-less`);
+		return undefined;
+	}
+	await env.MATCH_STATE.put(key, result.channelId, { expirationTtl: MATCH_STATE_TTL });
+	console.log(`[watcher] channel created ${matchId}: ${result.channelId}`);
+	return result.channelId;
+}
+
+/** Delete broadcast channels Apple still holds that no live `la-chan:` key references — orphans from a
+ *  cron crash between createChannel and the KV write (harmless at ~7/day vs the 10k cap, but shouldn't
+ *  silently accumulate). Throttled to ~once/6h via a KV timestamp. All calls route through the manage-host
+ *  transport, so if that port is blocked this degrades to a no-op (list returns []). */
+async function sweepOrphanChannels(env: Env, apns: ApnsConfig): Promise<void> {
+	const last = await env.MATCH_STATE.get(CHANNEL_SWEEP_KEY);
+	if (last && Date.now() - Number(last) < CHANNEL_SWEEP_INTERVAL_MS) return;
+	await env.MATCH_STATE.put(CHANNEL_SWEEP_KEY, String(Date.now()), { expirationTtl: 7 * 24 * 3600 });
+	const jwt = await apnsJwt(apns);
+	const channels = await listChannels(apns, jwt);
+	if (channels.length === 0) return;
+	const live = new Set<string>();
+	const list = await env.MATCH_STATE.list({ prefix: "la-chan:" });
+	for (const k of list.keys) {
+		const id = await env.MATCH_STATE.get(k.name);
+		if (id) live.add(id);
+	}
+	let deleted = 0;
+	for (const id of channels) {
+		if (!live.has(id) && (await deleteChannel(apns, jwt, id))) deleted++;
+	}
+	if (deleted > 0) console.log(`[watcher] orphan channel sweep: deleted ${deleted} of ${channels.length}`);
+}
+
 export default {
 	// Cron entry point (configured in wrangler.jsonc: "* * * * *").
 	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
@@ -199,9 +314,47 @@ export default {
 			return handleTestActivity(request, env);
 		}
 
+		// DEBUG: prove a Cloudflare WORKER can reach the broadcast channel-management port (the one
+		// Phase-0 risk the LOCAL probe couldn't answer). Creates + deletes a real channel from inside the
+		// Worker. Guarded by the trigger secret. If create fails with status 0 the port is likely blocked
+		// from Workers → flip broadcast.ts's manageChannelRequest seam to the Supabase Edge Function.
+		if (request.method === "POST" && url.pathname === "/probe-channel") {
+			return handleProbeChannel(request, env);
+		}
+
 		return new Response("Not found.", { status: 404 });
 	},
-} satisfies ExportedHandler<Env>;
+
+	// Queue consumer: drain ONE fan-out message per invocation. Each invocation gets its own fresh
+	// 50-external-subrequest budget, so ≤40 APNs POSTs always fit — the whole point of the redesign.
+	// Per-token dead tokens are pruned; only a SYSTEMIC failure (total outage/auth) throws so the batch
+	// retries (max_retries → DLQ). A partial/dead-token batch acks (no re-delivery → no dupes).
+	async queue(batch: MessageBatch<FanoutMessage>, env: Env): Promise<void> {
+		const apns = apnsConfig(env);
+		const sb = supabaseConfig(env);
+		let jwt: string;
+		try {
+			jwt = await apnsJwt(apns);
+		} catch (err) {
+			// Can't sign → every message this batch is undeliverable; retry them all (transient key/crypto).
+			console.log(`[watcher] queue JWT sign failed — retrying batch: ${err}`);
+			for (const m of batch.messages) m.retry();
+			return;
+		}
+		for (const m of batch.messages) {
+			try {
+				const r = await drainMessage(m.body, jwt, apns, sb);
+				console.log(`[watcher] drained ${r.label}: ${r.sent} sent, ${r.failed} failed, ${r.pruned} pruned`);
+				if (r.systemic) m.retry();
+				else m.ack();
+			} catch (err) {
+				// Unexpected throw (not the per-token path, which never throws) → retry this message.
+				console.log(`[watcher] drain threw (${m.body.label}) — retrying: ${err}`);
+				m.retry();
+			}
+		}
+	},
+} satisfies ExportedHandler<Env, FanoutMessage>;
 
 // A match is "in the live window" if it kicked off within the last 4h (covers
 // in-progress + just-finished) and not more than 5min in the future. This bounds
@@ -260,7 +413,6 @@ async function runWatch(env: Env): Promise<void> {
 
 	const sb = supabaseConfig(env);
 	const apns = apnsConfig(env);
-	let jwt: string | undefined; // signed lazily — only if an event actually fires.
 
 	for (const event of events) {
 		// Live-window gate (cheap, no I/O) before any KV read.
@@ -279,7 +431,9 @@ async function runWatch(env: Env): Promise<void> {
 
 		const detected = detectEvents(prev, match);
 
-		// One V1 fan-out (follower lookup → APNs) — shared by normal events and the VAR correction.
+		// One V1 fan-out (follower lookup → enqueue) — shared by normal events and the VAR correction.
+		// Delivery + prune happen in the queue consumer; here we only look up tokens and enqueue, so the
+		// cron tick never touches the 50-external subrequest cap regardless of follower count.
 		const fireV1 = async (ev: MatchEvent): Promise<void> => {
 			let tokens: string[];
 			try {
@@ -288,17 +442,7 @@ async function runWatch(env: Env): Promise<void> {
 				console.log(`[watcher] follower lookup failed (${ev.type} ${ev.eventId}): ${err}`);
 				return;
 			}
-			if (tokens.length === 0) return;
-			if (tokens.length > FANOUT_BUDGET) {
-				// NO SILENT FAILURES: past this many tokens the free-tier subrequest cap drops the overflow.
-				console.log(`[watcher] fanoutBudgetExceeded ${ev.type} team=${ev.teamIds[0]} n=${tokens.length} budget=${FANOUT_BUDGET} — see docs/push-fanout-scaling.md`);
-			}
-
-			jwt ??= await apnsJwt(apns);
-			const payload = toPayload(ev, env.CARD_PUBLIC_URL);
-			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
-			console.log(`[watcher] ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
-			await pruneDeadTokens(sb, "device_tokens", "token", results);
+			await enqueueV1(env, ev, tokens);
 		};
 
 		for (const ev of detected) await fireV1(ev);
@@ -333,7 +477,7 @@ async function runWatch(env: Env): Promise<void> {
 		// carry a stable clockStartEpoch (see StoredState.virtualKickoff).
 		const newState = nextState(prev, effectiveMatch, detected, Math.floor(Date.now() / 1000));
 		try {
-			await syncLiveActivity(env, sb, apns, effectiveMatch, detected.length > 0 || correctionFired, newState.virtualKickoff);
+			await syncLiveActivity(env, apns, effectiveMatch, detected.length > 0 || correctionFired, newState.virtualKickoff);
 		} catch (err) {
 			console.log(`[watcher] LA sync failed (${match.eventId}): ${err}`);
 		}
@@ -368,7 +512,20 @@ async function runWatch(env: Env): Promise<void> {
 		}
 		for (const event of ntEvents) {
 			const ko = kickoffMs(event);
-			if (ko === null || now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) continue;
+			if (ko === null) continue;
+
+			// USWNT V2 push-to-start — its OWN ≤20-min pre-kickoff window (wider than the live gate below,
+			// which excludes future matches). Only acts on USA matches with LA opt-ins; else a cheap no-op.
+			if (ko >= now && ko - now <= LA_START_LEAD_MS) {
+				try {
+					await maybeStartNationalActivity(env, event, ko, sb, apns);
+				} catch (err) {
+					console.log(`[watcher] USWNT LA start pass failed: ${err}`);
+				}
+			}
+
+			// Live-window gate for V1 detection + V2 broadcast sync.
+			if (now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) continue;
 			const match = parseMatch(event);
 			if (!match) continue;
 			const key = `match:${match.eventId}`;
@@ -384,20 +541,25 @@ async function runWatch(env: Env): Promise<void> {
 					console.log(`[watcher] NT follower lookup failed (${ev.type} ${ev.eventId}): ${err}`);
 					continue;
 				}
-				if (tokens.length === 0) continue;
-				jwt ??= await apnsJwt(apns);
-				const payload = toPayload(ev, env.CARD_PUBLIC_URL);
-				const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt!, apns)));
-				console.log(`[watcher] NT ${ev.type} "${ev.title}": ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
-				await pruneDeadTokens(sb, "device_tokens", "token", results);
+				await enqueueV1(env, ev, tokens); // same V1 message shape; tokens are device_tokens, pruned there
+			}
+
+			// State (with the monotonic clock anchor, like the club pass) for the KV write + USWNT V2 sync.
+			const ntNext = nextState(prev, match, detected, Math.floor(Date.now() / 1000));
+
+			// USWNT V2 broadcast sync — mirrors the club syncLiveActivity. A no-op unless a channel exists
+			// (created at push-to-start), so non-USA matches and USA matches with no LA opt-ins do nothing.
+			if (match.home.abbr === USWNT_CODE || match.away.abbr === USWNT_CODE) {
+				try {
+					await syncLiveActivity(env, apns, match, detected.length > 0, ntNext.virtualKickoff);
+				} catch (err) {
+					console.log(`[watcher] USWNT LA sync failed (${match.eventId}): ${err}`);
+				}
 			}
 
 			if (match.state === "post") await env.MATCH_STATE.delete(key);
-			else {
-				const ntNext = nextState(prev, match, detected);
-				// Same change-guard as the club pass — skip re-writing an identical NT state every tick.
-				if (!prev || !sameStoredState(prev, ntNext)) await env.MATCH_STATE.put(key, JSON.stringify(ntNext), { expirationTtl: MATCH_STATE_TTL });
-			}
+			// Same change-guard as the club pass — skip re-writing an identical NT state every tick.
+			else if (!prev || !sameStoredState(prev, ntNext)) await env.MATCH_STATE.put(key, JSON.stringify(ntNext), { expirationTtl: MATCH_STATE_TTL });
 		}
 	}
 
@@ -416,63 +578,58 @@ async function runWatch(env: Env): Promise<void> {
 	} catch (err) {
 		console.log(`[watcher] lineup pass failed: ${err}`);
 	}
+
+	// SEPARATE pass: sweep orphan broadcast channels (throttled ~6h internally). Isolated so a manage-host
+	// hiccup can't affect scores/pushes.
+	try {
+		await sweepOrphanChannels(env, apns);
+	} catch (err) {
+		console.log(`[watcher] channel sweep failed: ${err}`);
+	}
 }
 
-/** V2: push the current match state to its running Activities (UPDATE), END them at full time, or skip
- *  when only the local clock needs to tick. Resync is throttled (LA_RESYNC_MS) so we don't push per poll. */
+/** V2: BROADCAST the current match state to the match's channel — ONE request, Apple fans out to every
+ *  subscribed Activity (any audience size). END + delete the channel at full time, or skip when only the
+ *  local clock needs to tick. Broadcast replaces the old per-Activity-token loop: no per-token fan-out and
+ *  no catch-up pass (the start payload carried current state, and the No-Storage policy means a late
+ *  subscriber just waits for the next broadcast). Resync throttled by LA_RESYNC_MS. */
 async function syncLiveActivity(
 	env: Env,
-	sb: SupabaseConfig,
 	apns: ApnsConfig,
 	match: Match,
 	hadEvent: boolean,
 	virtualKickoff?: number,
 ): Promise<void> {
+	const chanId = await env.MATCH_STATE.get(channelKey(match.eventId));
+	if (!chanId) return; // no channel ⇒ no Activities were started for this match (or create failed)
 	const ended = match.state === "post";
 	const rsKey = `la-rs:${match.eventId}`;
-	const seenKey = `la-seen:${match.eventId}`;
-
-	const tokens = await activityTokensForMatch(sb, match.eventId);
-	if (tokens.length === 0) return;
-	const jwt = await apnsJwt(apns);
 	const state: LiveContentState = contentStateFromMatch(match, virtualKickoff);
+	const jwt = await apnsJwt(apns);
 
 	if (ended) {
-		// No dismissal-date → system default: the FT card lingers on the lock screen up to Apple's
-		// ~4h cap (dates further out are ignored), dismissable by the user anytime (owner request,
-		// 2026-07-05). The 15-min quick dismiss lives on only in /test-activity (test cards self-clean).
-		const endResults = await Promise.all(tokens.map((t) => endLiveActivity(t, state, jwt, apns)));
-		await pruneDeadTokens(sb, "live_activities", "push_token", endResults);
+		// No dismissal-date → the FT card lingers to Apple's ~4h cap, user-dismissable (owner request
+		// 2026-07-05). Then delete the channel + clean KV so nothing leaks past the match.
+		const r = await broadcastEnd(apns, jwt, chanId, state);
+		console.log(`[watcher] LA broadcast END ${match.eventId}: ${r.ok ? "ok" : `${r.status} ${r.reason ?? ""}`}`);
+		await deleteChannel(apns, jwt, chanId);
+		await env.MATCH_STATE.delete(channelKey(match.eventId));
 		await env.MATCH_STATE.delete(rsKey);
-		await env.MATCH_STATE.delete(seenKey);
-		console.log(`[watcher] LA end ${match.eventId}: ${tokens.length} activities`);
 		return;
 	}
 
-	// Per-Activity tokens seen for the FIRST time — a phone that registered its token late (iOS can take
-	// minutes to wake the app after push-to-start). Those MUST get the current state now, even on a quiet
-	// throttled poll, or they sit on the stale pre-match card until the next event (the "brother missed
-	// the early updates" gap).
-	const seenJson = await env.MATCH_STATE.get(seenKey);
-	const seen = new Set<string>(seenJson ? (JSON.parse(seenJson) as string[]) : []);
-	const fresh = tokens.filter((t) => !seen.has(t));
-
-	// Full resync on an event or once the drift cadence elapses; between those the widget's local clock ticks.
-	let resyncAll = hadEvent;
-	if (!resyncAll) {
+	// Broadcast on an event, or once the drift cadence elapses; between those the widget's local timer
+	// ticks on its own (no push). ONE broadcast reaches every subscriber regardless of how many.
+	let resync = hadEvent;
+	if (!resync) {
 		const last = await env.MATCH_STATE.get(rsKey);
-		resyncAll = !last || Date.now() - Number(last) >= LA_RESYNC_MS;
+		resync = !last || Date.now() - Number(last) >= LA_RESYNC_MS;
 	}
-
-	// Push to the full set (resync) OR — on a quiet poll — just the freshly-registered tokens (catch-up).
-	const targets = resyncAll ? tokens : fresh;
-	if (targets.length > 0) {
-		const updateResults = await Promise.all(targets.map((t) => updateLiveActivity(t, state, jwt, apns)));
-		await pruneDeadTokens(sb, "live_activities", "push_token", updateResults);
-		if (resyncAll) await env.MATCH_STATE.put(rsKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
-		if (fresh.length > 0) console.log(`[watcher] LA catch-up ${match.eventId}: ${fresh.length} new`);
+	if (resync) {
+		const r = await broadcastUpdate(apns, jwt, chanId, state);
+		console.log(`[watcher] LA broadcast update ${match.eventId}: ${r.ok ? "ok" : `${r.status} ${r.reason ?? ""}`}`);
+		await env.MATCH_STATE.put(rsKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
 	}
-	if (fresh.length > 0) await env.MATCH_STATE.put(seenKey, JSON.stringify(tokens), { expirationTtl: MATCH_STATE_TTL });
 }
 
 /** SEPARATE start trigger (NOT detectEvents): for matches ≤5 min pre-kickoff, remote-start a Live
@@ -499,7 +656,6 @@ async function startUpcomingActivities(
 			continue;
 		}
 		if (tokens.length === 0) continue; // no opt-ins yet — retry next poll, still inside the window
-		const jwt = await apnsJwt(apns);
 		const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr);
 		const state = preContentState(kickoffLabel(ko));
 		// QUIET BANNER (device-proven 7/4): the start push MUST carry an `alert` or iOS silently never
@@ -513,12 +669,49 @@ async function startUpcomingActivities(
 			body: "Live match card is on your lock screen.",
 			sound: "",
 		};
-		const results = await Promise.all(tokens.map((t) => startLiveActivity(t, attrs, state, jwt, apns, undefined, startAlert)));
-		const ok = results.filter((r) => r.ok).length;
-		console.log(`[watcher] LA start ${info.homeAbbr} vs ${info.awayAbbr}: ${ok}/${tokens.length}`);
-		await pruneDeadTokens(sb, "live_activity_start_tokens", "token", results);
+		// The start push is the ONE per-device Live Activity fan-out per match → it rides the Queues rail
+		// like V1. `channelId` (iOS 18 broadcast, added in the broadcast phase) goes in the start payload so
+		// the created Activity auto-subscribes to the match channel for every later update.
+		const channelId = await ensureMatchChannel(env, apns, info.matchId);
+		await enqueueLaStart(env, apns, attrs, state, startAlert, tokens, channelId);
 		await env.MATCH_STATE.put(startedKey, String(now), { expirationTtl: MATCH_STATE_TTL });
 	}
+}
+
+/** USWNT V2 push-to-start (called from the NT pass): for an UPCOMING USA match in the ≤20-min window,
+ *  create the match channel + enqueue a Live Activity start to everyone following the USWNT with Live
+ *  Activities on. Mirrors startUpcomingActivities but gated on the competition follow key, and stamps the
+ *  attributes `isNational` so the widget renders FIFA-code flags. KV-deduped via the shared la-start key. */
+async function maybeStartNationalActivity(
+	env: Env,
+	event: ScoreboardEvent,
+	ko: number,
+	sb: SupabaseConfig,
+	apns: ApnsConfig,
+): Promise<void> {
+	const info = upcomingInfo(event);
+	if (!info) return;
+	if (info.homeAbbr !== USWNT_CODE && info.awayAbbr !== USWNT_CODE) return; // USWNT only, for now
+	const startedKey = `la-start:${info.matchId}`;
+	if (await env.MATCH_STATE.get(startedKey)) return;
+	let tokens: string[];
+	try {
+		tokens = await startTokensForCompetition(sb, USWNT_FOLLOW_KEY);
+	} catch (err) {
+		console.log(`[watcher] USWNT LA start lookup failed (${info.matchId}): ${err}`);
+		return;
+	}
+	if (tokens.length === 0) return; // no LA opt-ins yet — retry next poll, still inside the window
+	const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr, "International", true);
+	const state = preContentState(kickoffLabel(ko));
+	const startAlert = {
+		title: `${info.homeAbbr} vs ${info.awayAbbr}`,
+		body: "Live match card is on your lock screen.",
+		sound: "",
+	};
+	const channelId = await ensureMatchChannel(env, apns, info.matchId);
+	await enqueueLaStart(env, apns, attrs, state, startAlert, tokens, channelId);
+	await env.MATCH_STATE.put(startedKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
 }
 
 /** SEPARATE pre-kickoff trigger (NOT detectEvents — lineups aren't on the scoreboard): for matches in
@@ -577,11 +770,7 @@ async function checkUpcomingLineups(
 			continue; // don't mark KV — retry next tick so a transient lookup failure doesn't drop the alert
 		}
 		if (tokens.length > 0) {
-			const jwt = await apnsJwt(apns);
-			const payload = toPayload(lineupEvent, env.CARD_PUBLIC_URL);
-			const results = await Promise.all(tokens.map((t) => sendApns(t, payload, jwt, apns)));
-			console.log(`[watcher] lineup ${info.homeAbbr} vs ${info.awayAbbr}: ${results.filter((r) => r.ok).length}/${tokens.length} pushed`);
-			await pruneDeadTokens(sb, "device_tokens", "token", results);
+			await enqueueV1(env, lineupEvent, tokens);
 		} else {
 			console.log(`[watcher] lineup ${info.homeAbbr} vs ${info.awayAbbr}: published, 0 opt-ins`);
 		}
@@ -598,6 +787,38 @@ function kickoffLabel(ko: number): string {
 	} catch {
 		return "Kickoff soon";
 	}
+}
+
+/** DEBUG: create + delete a broadcast channel FROM THE WORKER to confirm the Worker runtime can reach
+ *  the channel-management host/port (production `…:2196`). Returns the create status so a blocked port
+ *  (status 0 / network error) is distinguishable from an auth/feature problem. Guarded by the secret. */
+async function handleProbeChannel(request: Request, env: Env): Promise<Response> {
+	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
+		return new Response("Forbidden.", { status: 403 });
+	}
+	const apns = apnsConfig(env);
+	const created = await createChannelSigned(apns);
+	let deleted = false;
+	if (created.ok && created.channelId) {
+		deleted = await deleteChannel(apns, await apnsJwt(apns), created.channelId);
+	}
+	const reachable = created.ok || (created.status > 0); // any HTTP reply (even 4xx) means the port was reached
+	return new Response(
+		JSON.stringify(
+			{
+				host: apns.host,
+				create: { ok: created.ok, status: created.status, channelId: created.channelId, reason: created.reason },
+				deleted,
+				portReachableFromWorker: reachable,
+				note: reachable
+					? "Worker reached the manage port ✅ (channel management works from the Worker)"
+					: "Worker could NOT reach the manage port (status 0) → flip broadcast.ts seam to the Supabase Edge fallback",
+			},
+			null,
+			2,
+		),
+		{ status: created.ok ? 200 : 502, headers: { "Content-Type": "application/json" } },
+	);
 }
 
 /**

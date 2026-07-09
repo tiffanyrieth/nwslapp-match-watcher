@@ -77,24 +77,41 @@ export interface ApnsResult {
 	reason?: string;
 }
 
-/** Send one push to one device token. Never throws — returns the per-token result. */
-export async function sendApns(
+/** Per-send APNs headers that vary by push kind (V1 alert vs Live Activity, dedupe id). */
+export interface ApnsSendOptions {
+	/** apns-topic — the bundle id for V1 alerts, `<bundle>.push-type.liveactivity` for Live Activities. */
+	topic: string;
+	/** apns-push-type — "alert" | "liveactivity". */
+	pushType: string;
+	/** apns-priority — "10" (immediate) default; "5"/"1" for background. */
+	priority?: string;
+	/** apns-collapse-id — deterministic per-event key so a redelivered/re-enqueued SAME event collapses
+	 *  on-device to one notification (at-least-once safety for the Queues fan-out). ≤64 bytes. */
+	collapseId?: string;
+}
+
+/** Send one push to one device token with explicit headers. Never throws — returns the per-token
+ *  result. The generic core behind both the V1 alert path and the Live-Activity-start fan-out. */
+export async function sendPush(
 	token: string,
-	payload: Record<string, unknown>,
+	body: Record<string, unknown>,
+	opts: ApnsSendOptions,
 	jwt: string,
 	cfg: ApnsConfig,
 ): Promise<ApnsResult> {
 	try {
+		const headers: Record<string, string> = {
+			authorization: `bearer ${jwt}`,
+			"apns-topic": opts.topic,
+			"apns-push-type": opts.pushType,
+			"apns-priority": opts.priority ?? "10",
+			"content-type": "application/json",
+		};
+		if (opts.collapseId) headers["apns-collapse-id"] = opts.collapseId;
 		const res = await fetch(`https://${cfg.host}/3/device/${token}`, {
 			method: "POST",
-			headers: {
-				authorization: `bearer ${jwt}`,
-				"apns-topic": cfg.bundleId,
-				"apns-push-type": "alert",
-				"apns-priority": "10",
-				"content-type": "application/json",
-			},
-			body: JSON.stringify(payload),
+			headers,
+			body: JSON.stringify(body),
 		});
 		if (res.ok) return { token, ok: true, status: res.status };
 		// APNs returns a JSON {reason} on failure (e.g. BadDeviceToken, Unregistered).
@@ -108,4 +125,15 @@ export async function sendApns(
 	} catch (err) {
 		return { token, ok: false, status: 0, reason: String(err) };
 	}
+}
+
+/** Send one V1 alert push to one device token. Never throws — returns the per-token result.
+ *  Thin wrapper over sendPush for the test routes + any direct alert send. */
+export async function sendApns(
+	token: string,
+	payload: Record<string, unknown>,
+	jwt: string,
+	cfg: ApnsConfig,
+): Promise<ApnsResult> {
+	return sendPush(token, payload, { topic: cfg.bundleId, pushType: "alert" }, jwt, cfg);
 }
