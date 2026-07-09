@@ -108,6 +108,18 @@ const NT_LEAGUES = [
 	"uefa.weuro",
 	"fifa.wwc",
 	"fifa.w.olympics",
+	// Confederation championships + WC/Olympic qualifying — so a followed NT's COMPETITIVE fixtures
+	// alert too, not just friendlies (kept in sync with the proxy allowlist + app NationalTeamFeed.all).
+	// Each is one more per-tick scoreboard subrequest, but all are seasonal (empty off-tournament → the
+	// live-window gate does zero KV/APNs work), and 15 feeds stays well under the 50-subrequest cap.
+	"uefa.w.nations",
+	"fifa.wworldq.uefa",
+	"afc.w.asian.cup",
+	"caf.w.nations",
+	"conmebol.america.femenina",
+	"fifa.wwcq.ply",
+	"fifa.w.concacaf.olympicsq",
+	"global.pinatar_cup",
 ] as const;
 
 // A national-team match event → the two `competition_alert_preferences` follow keys to fan out to
