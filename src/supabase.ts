@@ -205,3 +205,26 @@ export async function startTokensForTeams(cfg: SupabaseConfig, teamIds: string[]
 	);
 	return uniq(rows.map((r) => r.token));
 }
+
+/** The NATIONAL-TEAM twin of startTokensForTeams (USWNT V2): push-to-start tokens for users who follow
+ *  this competition (`competition_alert_preferences.follow_key` = "nt:USA") with alerts ON, have opted IN
+ *  to Live Activities, and registered a push-to-start token. Same two-gate + token-resolve tail. */
+export async function startTokensForCompetition(cfg: SupabaseConfig, followKey: string): Promise<string[]> {
+	const alertRows = await rest<{ user_id: string }>(
+		cfg,
+		`competition_alert_preferences?follow_key=in.${inListQuoted([followKey])}&alerts_enabled=eq.true&select=user_id`,
+	);
+	const ids = uniq(alertRows.map((r) => r.user_id));
+	if (ids.length === 0) return [];
+	const prefRows = await rest<{ user_id: string }>(
+		cfg,
+		`notification_preferences?user_id=in.${inList(ids)}&live_activities_enabled=eq.true&select=user_id`,
+	);
+	const enabledIds = uniq(prefRows.map((r) => r.user_id));
+	if (enabledIds.length === 0) return [];
+	const rows = await rest<{ token: string }>(
+		cfg,
+		`live_activity_start_tokens?user_id=in.${inList(enabledIds)}&select=token`,
+	);
+	return uniq(rows.map((r) => r.token));
+}

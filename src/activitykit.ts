@@ -43,12 +43,43 @@ export interface LiveAttributes {
 	homeColorHex: string;
 	awayColorHex: string;
 	competition: string;
+	/** True for a national-team match → the widget renders FIFA-code FLAGS instead of club crests.
+	 *  Additive-optional: old app builds ignore it (club crest path), old payloads decode (Swift Optional). */
+	isNational?: boolean;
 }
 
 const ATTRIBUTES_TYPE = "MatchActivityAttributes"; // must equal the Swift type name
 
-function liveTopic(cfg: ApnsConfig): string {
+/** The Live Activity APNs topic (`<bundle>.push-type.liveactivity`). Exported so the Queues producer
+ *  can stamp the per-message topic without importing the send internals. */
+export function liveTopic(cfg: ApnsConfig): string {
 	return `${cfg.bundleId}.push-type.liveactivity`;
+}
+
+/** Build the `aps` body for a START push (push-to-start token) WITHOUT sending it — so the Queues
+ *  producer can enqueue it and the consumer delivers. Same shape startLiveActivity sends inline.
+ *  ⚠️ THE ALERT IS REQUIRED TO RENDER (device-proven 2026-07-04): a start push without an `alert`
+ *  200s but iOS never presents the card. Buzz-free = `alert` + `sound: ""`. */
+export function buildStartAps(
+	attributes: LiveAttributes,
+	state: LiveContentState,
+	staleSeconds = 8 * 3600,
+	alert?: { title: string; body: string; sound?: string },
+	/** iOS 18 broadcast: the created Activity auto-subscribes to this channel for later updates. */
+	inputPushChannel?: string,
+): Record<string, unknown> {
+	const now = Math.floor(Date.now() / 1000);
+	return compact({
+		timestamp: now,
+		event: "start",
+		"attributes-type": ATTRIBUTES_TYPE,
+		attributes,
+		"content-state": compact(state),
+		"stale-date": now + staleSeconds,
+		"relevance-score": 100,
+		...(inputPushChannel ? { "input-push-channel": inputPushChannel } : {}),
+		...(alert ? { alert } : {}),
+	});
 }
 
 /** Drop undefined/null so we never push a null clockStartEpoch / staticLabel into content-state. */
@@ -109,19 +140,39 @@ export async function startLiveActivity(
 	// second A/B axis: omitting it STILL buzzed on device, so `sound: ""` tests whether a buzz-free
 	// banner is possible at all. The cron path passes nothing here (until the design call lands).
 	alert?: { title: string; body: string; sound?: string },
+	inputPushChannel?: string,
 ): Promise<ApnsResult> {
+	const aps = buildStartAps(attributes, state, staleSeconds, alert, inputPushChannel);
+	return postLiveActivity(pushToStartToken, aps, jwt, cfg, "10");
+}
+
+/** Build the `aps` body for an UPDATE push WITHOUT sending — so a broadcast can carry it to a channel
+ *  (fanned out by Apple) instead of one per-Activity token. Same shape updateLiveActivity sends. */
+export function buildUpdateAps(
+	state: LiveContentState,
+	staleSeconds = 3600,
+	alert?: { title: string; body: string; sound?: string },
+): Record<string, unknown> {
 	const now = Math.floor(Date.now() / 1000);
-	const aps = compact({
+	return compact({
 		timestamp: now,
-		event: "start",
-		"attributes-type": ATTRIBUTES_TYPE,
-		attributes,
+		event: "update",
 		"content-state": compact(state),
 		"stale-date": now + staleSeconds,
-		"relevance-score": 100,
 		...(alert ? { alert } : {}),
 	});
-	return postLiveActivity(pushToStartToken, aps, jwt, cfg, "10");
+}
+
+/** Build the `aps` body for an END push WITHOUT sending — for a broadcast end. `dismissEpoch` omitted →
+ *  the final card lingers to Apple's ~4h cap (the cron's behavior). */
+export function buildEndAps(finalState: LiveContentState, dismissEpoch?: number): Record<string, unknown> {
+	const now = Math.floor(Date.now() / 1000);
+	return compact({
+		timestamp: now,
+		event: "end",
+		"content-state": compact(finalState),
+		"dismissal-date": dismissEpoch,
+	});
 }
 
 /** UPDATE a running Activity (per-Activity token). Silent by default — no `alert`, no buzz.
