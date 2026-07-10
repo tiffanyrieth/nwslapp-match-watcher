@@ -866,6 +866,10 @@ async function handleTestBroadcast(request: Request, env: Env): Promise<Response
 		phase?: LivePhase;
 		min?: number;
 		sc?: string;
+		hsc?: string[]; // per-side scorer lines (home) — what the real watcher populates
+		asc?: string[]; // per-side scorer lines (away)
+		hr?: number; // home red cards
+		ar?: number; // away red cards
 		isNational?: boolean;
 	};
 	try {
@@ -890,6 +894,10 @@ async function handleTestBroadcast(request: Request, env: Env): Promise<Response
 		staticLabel: phase === "pre" ? "3:00 PM" : phase === "halftime" ? "HT" : phase === "fulltime" ? "FT" : undefined,
 		lastScorer: p.sc,
 		broadcast: "Paramount+",
+		homeScorers: p.hsc,
+		awayScorers: p.asc,
+		homeRedCards: p.hr,
+		awayRedCards: p.ar,
 	};
 	const json = (body: unknown, status: number): Response =>
 		new Response(JSON.stringify(body, null, 2), { status, headers: { "Content-Type": "application/json" } });
