@@ -16,7 +16,16 @@ const TEAM_HEX: Record<string, string> = {
 	HOU: "FF8A3D", KC: "30C7E8", NC: "E0354B", SEA: "6E7FFF", ORL: "B07CE8", POR: "FF4D6D",
 	LOU: "C7A8FF", SD: "FFB340", UTA: "FFD60A", WAS: "FF4D5E",
 };
-export const colorHex = (abbr: string): string => TEAM_HEX[abbr.toUpperCase()] ?? "8E8E93";
+// National-team brand hex by FIFA code — mirrors NWSLApp Models/NationalTeam (brandHex). So a USWNT V2
+// card's team-color wash uses the country's real colors (USA blue vs CAN red) instead of a flat grey.
+// No overlap with the NWSL abbreviations above, so the two tables chain cleanly.
+const NT_HEX: Record<string, string> = {
+	USA: "2E5BE0", MEX: "1FA463", CAN: "E0322B", BRA: "00A24A", COL: "F4C20D", ENG: "E8413A",
+	JAM: "F4C20D", JPN: "E0322B", AUS: "F4C20D", FRA: "2E5BE0", GER: "E0322B", HAI: "2E5BE0",
+	KOR: "E0322B", NGA: "1FA463", ESP: "E8413A", SWE: "3A7BE0",
+};
+export const colorHex = (abbr: string): string =>
+	TEAM_HEX[abbr.toUpperCase()] ?? NT_HEX[abbr.toUpperCase()] ?? "8E8E93";
 
 function phaseFromMatch(m: Match): LivePhase {
 	if (m.state === "post") return "fulltime";
@@ -85,8 +94,15 @@ export function contentStateFromMatch(m: Match, virtualKickoff?: number): LiveCo
 	};
 }
 
-/** Static attributes for a match (set once at START). competition is NWSL until the watcher polls others. */
-export function attributesFor(matchId: string, homeAbbr: string, awayAbbr: string, competition = "NWSL"): LiveAttributes {
+/** Static attributes for a match (set once at START). competition is NWSL until the watcher polls others.
+ *  `isNational` → the widget renders FIFA-code flags instead of club crests (USWNT V2). */
+export function attributesFor(
+	matchId: string,
+	homeAbbr: string,
+	awayAbbr: string,
+	competition = "NWSL",
+	isNational = false,
+): LiveAttributes {
 	return {
 		matchId,
 		homeAbbr,
@@ -94,6 +110,7 @@ export function attributesFor(matchId: string, homeAbbr: string, awayAbbr: strin
 		homeColorHex: colorHex(homeAbbr),
 		awayColorHex: colorHex(awayAbbr),
 		competition,
+		...(isNational ? { isNational: true } : {}),
 	};
 }
 
