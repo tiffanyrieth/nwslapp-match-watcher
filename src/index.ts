@@ -674,16 +674,16 @@ async function startUpcomingActivities(
 		if (tokens.length === 0) continue; // no opt-ins yet — retry next poll, still inside the window
 		const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr);
 		const state = preContentState(kickoffLabel(ko));
-		// QUIET BANNER (device-proven 7/4): the start push MUST carry an `alert` or iOS silently never
-		// renders the card (APNs 200s regardless — the old no-alert "silent" design shipped invisible
-		// Activities). `sound: ""` keeps it buzz-free: card + banner appear with NO sound/vibration, so
-		// V1's kickoff push at minute 0 remains the single audible interrupt. All three axes A/B'd on
-		// device 2026-07-04: no alert → never renders; alert w/o sound key → renders but BUZZES;
-		// alert + sound:"" → renders, no buzz.
+		// ARRIVAL-BUZZ LAW (corrected 2026-07-09 against the 7/5 A/B logs — see docs/live-activity-v2.md §3):
+		// the start push MUST carry an `alert`, AND a fully-silent `sound: ""` is UNRELIABLE — on real games
+		// it often never presents (owner A/B: silent → "does not show up"; sounded → "went straight to my
+		// lock screen"). Likely iOS enforces a ONE-TIME arrival buzz for a persistent, power-drawing
+		// lock-screen surface. So the start BUZZES ONCE (`sound: "default"`); every UPDATE/END stays silent
+		// (alert-less) — the Athletic pattern. The earlier "sound:'' renders buzz-free" claim was overfit.
 		const startAlert = {
 			title: `${info.homeAbbr} vs ${info.awayAbbr}`,
 			body: "Live match card is on your lock screen.",
-			sound: "",
+			sound: "default",
 		};
 		// The start push is the ONE per-device Live Activity fan-out per match → it rides the Queues rail
 		// like V1. `channelId` (iOS 18 broadcast, added in the broadcast phase) goes in the start payload so
@@ -720,10 +720,11 @@ async function maybeStartNationalActivity(
 	if (tokens.length === 0) return; // no LA opt-ins yet — retry next poll, still inside the window
 	const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr, "International", true);
 	const state = preContentState(kickoffLabel(ko));
+	// Buzz-once arrival, then silent (see the club start above + docs/live-activity-v2.md §3).
 	const startAlert = {
 		title: `${info.homeAbbr} vs ${info.awayAbbr}`,
 		body: "Live match card is on your lock screen.",
-		sound: "",
+		sound: "default",
 	};
 	const channelId = await ensureMatchChannel(env, apns, info.matchId);
 	await enqueueLaStart(env, apns, attrs, state, startAlert, tokens, channelId);
@@ -910,7 +911,7 @@ async function handleTestBroadcast(request: Request, env: Env): Promise<Response
 		await env.MATCH_STATE.put(chanKey, created.channelId, { expirationTtl: MATCH_STATE_TTL });
 		const national = p.isNational !== false; // default true — this route is primarily the flag test
 		const attrs = attributesFor(matchId, p.h ?? "USA", p.a ?? "CAN", national ? "International" : "NWSL", national);
-		const startAlert = { title: `${p.h ?? "USA"} vs ${p.a ?? "CAN"}`, body: "Live match card is on your lock screen.", sound: "" };
+		const startAlert = { title: `${p.h ?? "USA"} vs ${p.a ?? "CAN"}`, body: "Live match card is on your lock screen.", sound: "default" };
 		let tokens: string[];
 		try {
 			tokens = p.token ? [p.token] : await allStartTokens(sb);
