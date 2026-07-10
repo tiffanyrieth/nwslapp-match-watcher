@@ -588,9 +588,20 @@ function crestAbbr(event: MatchEvent): string {
 	return event.homeAbbr;
 }
 
+/** V1 crest-attachment policy: a crest is shown ONLY for TEAM-ATTRIBUTABLE events — a goal (the
+ *  scorer's club) and a red card (the carded club). Every match-level moment (kickoff, lineup,
+ *  halftime, full-time) AND a VAR correction is NEUTRAL: a single club's crest is ambiguous or
+ *  misleading to a fan following the OTHER team (e.g. an away-team follower saw the HOME crest on
+ *  "Lineups in"), so no image is attached and the push renders as clean title+subtitle text. The
+ *  tap still deep-links to the match either way. (Owner rule, 2026-07-10.) */
+export function eventCarriesCrest(type: MatchEventType): boolean {
+	return type === "goal" || type === "redcard";
+}
+
 /** The nwslapp-card worker's 512×512 crest-tile PNG for an event (public origin — the NSE
  *  downloads it). A TILE, not the bare crest: full-bleed team-color wash + crest at ~86%, so
- *  iOS's fixed thumbnail slot renders edge-to-edge instead of a tiny floating transparent crest. */
+ *  iOS's fixed thumbnail slot renders edge-to-edge instead of a tiny floating transparent crest.
+ *  Called only for `eventCarriesCrest` events. */
 export function thumbUrl(cardBase: string, event: MatchEvent): string {
 	// ?s= is a STYLE VERSION cache-buster: /thumb responses edge-cache 24h keyed by full URL, so a
 	// tile-design change must bump this or devices keep pulling the old look until the cache expires.
@@ -606,13 +617,14 @@ function interruptionLevel(type: MatchEventType): "time-sensitive" | "active" {
 /**
  * The APNs payload for a detected event (2026-07-05 redesign: title+subtitle, crest attachment).
  *   - `alert` = title + subtitle ONLY (no body — the copy system's two-line contract).
- *   - `mutable-content: 1` wakes the Notification Service Extension (required, or
- *     the NSE never runs and the image is never attached).
- *   - `imageUrl` (custom) points at the card worker's /thumb crest TILE (scoring club / winner /
- *     home — see crestAbbr). Full-bleed square ⇒ the collapsed thumbnail renders at max size.
+ *   - `mutable-content: 1` wakes the Notification Service Extension to download + attach the crest.
+ *     It is set ONLY when there IS a crest (goal / red card) — a neutral event has no image, so the
+ *     NSE has nothing to do and the push renders as plain text (see eventCarriesCrest).
+ *   - `imageUrl` (custom, crest events only) points at the card worker's /thumb crest TILE for the
+ *     scoring/carded club. Full-bleed square ⇒ the collapsed thumbnail renders at max size.
  *   - `thread-id: match-<id>` stacks a match's lineup/kickoff/goal/HT/FT together.
  *   - `interruption-level` is per-event (see interruptionLevel).
- *   - `eventID` is kept verbatim — the iOS tap handler deep-links off it.
+ *   - `eventID` is kept verbatim — the iOS tap handler deep-links off it (crest or not).
  *
  * `cardBase` is the nwslapp-card worker's public origin (where GET /thumb/{ABBR} lives).
  */
@@ -620,17 +632,20 @@ export function toPayload(event: MatchEvent, cardBase: string): Record<string, u
 	const alert: Record<string, string> = { title: event.title };
 	if (event.subtitle) alert.subtitle = event.subtitle;
 	if (event.body) alert.body = event.body; // legacy field — the builders no longer set it
-	return {
-		aps: {
-			alert,
-			"mutable-content": 1,
-			sound: "default",
-			"thread-id": `match-${event.eventId}`,
-			"interruption-level": interruptionLevel(event.type),
-		},
+	const withCrest = eventCarriesCrest(event.type);
+	const aps: Record<string, unknown> = {
+		alert,
+		sound: "default",
+		"thread-id": `match-${event.eventId}`,
+		"interruption-level": interruptionLevel(event.type),
+	};
+	if (withCrest) aps["mutable-content"] = 1; // only wake the NSE when there's a crest to attach
+	const payload: Record<string, unknown> = {
+		aps,
 		eventID: event.eventId,
 		matchId: event.eventId,
 		event: event.type,
-		imageUrl: thumbUrl(cardBase, event),
 	};
+	if (withCrest) payload.imageUrl = thumbUrl(cardBase, event); // scoring/carded club only; else neutral
+	return payload;
 }
