@@ -675,15 +675,16 @@ async function startUpcomingActivities(
 		const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr);
 		const state = preContentState(kickoffLabel(ko));
 		// ARRIVAL-BUZZ LAW (corrected 2026-07-09 against the 7/5 A/B logs — see docs/live-activity-v2.md §3):
-		// the start push MUST carry an `alert`, AND a fully-silent `sound: ""` is UNRELIABLE — on real games
-		// it often never presents (owner A/B: silent → "does not show up"; sounded → "went straight to my
-		// lock screen"). Likely iOS enforces a ONE-TIME arrival buzz for a persistent, power-drawing
-		// lock-screen surface. So the start BUZZES ONCE (`sound: "default"`); every UPDATE/END stays silent
-		// (alert-less) — the Athletic pattern. The earlier "sound:'' renders buzz-free" claim was overfit.
+		// THE START MUST CARRY AN `alert` OBJECT or iOS silently drops it (render law, device-proven 7/4).
+		// `sound` is the EMPTY STRING — the exact value that rendered (and still buzzed once) on the real
+		// 7/5 game. A 7/9 change to `sound: "default"` FAILED to present on the 7/10 real games (three
+		// APNs-accepted starts, zero cards on device); reverted to the proven "" per that real-game A/B.
+		// NOTE: `sound:""` is NOT "fully silent" — the alert is present, so iOS still emits ONE arrival
+		// buzz. Every UPDATE/END stays alert-less (silent) — the Athletic pattern.
 		const startAlert = {
 			title: `${info.homeAbbr} vs ${info.awayAbbr}`,
 			body: "Live match card is on your lock screen.",
-			sound: "default",
+			sound: "", // 7/5 real-game-proven value — NOT "default" (that didn't present on 7/10)
 		};
 		// The start push is the ONE per-device Live Activity fan-out per match → it rides the Queues rail
 		// like V1. `channelId` (iOS 18 broadcast, added in the broadcast phase) goes in the start payload so
@@ -724,7 +725,7 @@ async function maybeStartNationalActivity(
 	const startAlert = {
 		title: `${info.homeAbbr} vs ${info.awayAbbr}`,
 		body: "Live match card is on your lock screen.",
-		sound: "default",
+		sound: "", // match the club start / 7/5 real-game-proven value (see startUpcomingActivities)
 	};
 	const channelId = await ensureMatchChannel(env, apns, info.matchId);
 	await enqueueLaStart(env, apns, attrs, state, startAlert, tokens, channelId);
