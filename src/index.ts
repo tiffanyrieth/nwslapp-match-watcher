@@ -36,6 +36,7 @@ import {
 	toPayload,
 	type Match,
 	type MatchEvent,
+	type ScoreboardDetail,
 	type ScoreboardEvent,
 	type StoredState,
 } from "./events";
@@ -415,7 +416,10 @@ async function refetchMatch(env: Env, eventId: string): Promise<Match | null> {
 			return null;
 		}
 		const evs = ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
-		const found = evs.find((e) => e.id === eventId);
+		// DEBUG: the VAR-correction re-poll must also see the synthetic fixture (it's injected client-side,
+		// not in the real proxy scoreboard) — else a fake disallow could never confirm.
+		const fake = await readFakeMatch(env);
+		const found = fake && fake.id === eventId ? fake : evs.find((e) => e.id === eventId);
 		return found ? parseMatch(found) : null;
 	} catch (err) {
 		console.log(`[watcher] correction re-poll threw: ${err}`);
@@ -440,6 +444,12 @@ async function runWatch(env: Env): Promise<void> {
 		console.log(`[watcher] scoreboard fetch threw: ${err}`);
 		return;
 	}
+
+	// DEBUG HARNESS: inject the KV-flagged synthetic fixture into the FULL event list, so the cron's real
+	// club detect loop (kickoff/goal/FT + V2 broadcast), LA-start pass, and lineup pass all process it —
+	// exercising the whole organic V2 lifecycle. No-op unless POST /debug/fake-match set the flag.
+	const fakeEvent = await readFakeMatch(env);
+	if (fakeEvent) events = [...events, fakeEvent];
 
 	const sb = supabaseConfig(env);
 	const apns = apnsConfig(env);
@@ -595,11 +605,8 @@ async function runWatch(env: Env): Promise<void> {
 
 	// SEPARATE pass (not tangled into detectEvents): remote-start a Live Activity for any match
 	// kicking off within the next ~5 min that a signed-in user has alerts ON for. KV-deduped.
-	// DEBUG: a KV-flagged synthetic fixture (POST /debug/fake-match) is appended HERE ONLY — the LA-start
-	// pass sees it, the V1/lineup/NT passes above do NOT (they used `events`), so it can't spoof a goal.
 	try {
-		const fake = await readFakeMatch(env);
-		await startUpcomingActivities(env, fake ? [...events, fake] : events, sb, apns);
+		await startUpcomingActivities(env, events, sb, apns);
 	} catch (err) {
 		console.log(`[watcher] LA start pass failed: ${err}`);
 	}
@@ -665,42 +672,79 @@ async function syncLiveActivity(
 	}
 }
 
-/** DEBUG HARNESS: the synthetic fixture the cron injects into the LA-start pass, or null when the
- *  `debug:fake-match` KV flag isn't set. Shaped as a minimal ScoreboardEvent — only the fields the
- *  LA-start pass reads (date for kickoffMs; competitions[0].competitors for upcomingInfo). Real ESPN
- *  team ids so `startTokensForTeams` matches a real `team_alert_preferences` row. Set via
- *  POST /debug/fake-match; auto-expires. Fed ONLY to startUpcomingActivities (see runWatch). */
-interface FakeMatchSpec { id: string; date: string; homeId: string; homeAbbr: string; awayId: string; awayAbbr: string }
+/** DEBUG HARNESS: the synthetic fixture the cron injects (into the WHOLE event list — club detect loop,
+ *  LA-start pass, and lineup pass), or null when `debug:fake-match` isn't set. It EVOLVES over a timeline
+ *  in the spec so the cron's REAL code drives the full V2 lifecycle: pre (LA-start fires → card + channel)
+ *  → kickoff at `kickoffMs` (state "in", clock ticking → detectEvents kickoff + syncLiveActivity broadcast)
+ *  → goal at `goalMs` (home score 0→1 → detectEvents goal + broadcast UPDATE — the leg we're proving) →
+ *  FT at `ftMs` (state "post" → broadcastEnd). Real ESPN team ids so `startTokensForTeams` + `tokensForEvent`
+ *  gate on a real `team_alert_preferences` row. `date` = kickoffMs so `kickoffMs(event)` drives the
+ *  LA-start 20-min window. Shapes match what parseMatch/detectEvents read (status.type.state/name,
+ *  status.period, status.clock[sec], competitors[].score). */
+interface FakeGoal { at: number; side: "home" | "away"; scorer: string; minute: number; disallowedAt?: number }
+interface FakeRed { at: number; side: "home" | "away"; player: string; minute: number }
+interface FakeMatchSpec {
+	id: string; homeId: string; homeAbbr: string; awayId: string; awayAbbr: string;
+	kickoffMs: number; ftMs: number;
+	goals: FakeGoal[]; reds: FakeRed[];
+}
 async function readFakeMatch(env: Env): Promise<ScoreboardEvent | null> {
 	const spec = (await env.MATCH_STATE.get("debug:fake-match", "json")) as FakeMatchSpec | null;
 	if (!spec) return null;
+	const now = Date.now();
+	let state = "pre", name = "STATUS_SCHEDULED", period = 0, clock = 0;
+	if (now >= spec.ftMs) {
+		state = "post"; name = "STATUS_FULL_TIME"; period = 2;
+	} else if (now >= spec.kickoffMs) {
+		state = "in"; name = "STATUS_FIRST_HALF"; period = 1;
+		clock = Math.floor((now - spec.kickoffMs) / 1000); // seconds elapsed
+	}
+	// Build the scoreboard `details` (scoring plays + red cards) + running score AS OF `now` from the
+	// timeline. A goal with `disallowedAt` in the past is REMOVED (score decrements + its play drops) → a
+	// clean score DECREASE the watcher reads as a VAR correction. parsePlays/parseCards read these exact fields.
+	const sideId = (s: "home" | "away") => (s === "home" ? spec.homeId : spec.awayId);
+	const details: ScoreboardDetail[] = [];
+	let homeScore = 0, awayScore = 0;
+	for (const g of spec.goals ?? []) {
+		if (now < g.at) continue;                               // not scored yet
+		if (g.disallowedAt && now >= g.disallowedAt) continue;  // VAR-disallowed → gone from score + card
+		if (g.side === "home") homeScore++; else awayScore++;
+		details.push({ scoringPlay: true, team: { id: sideId(g.side) }, clock: { displayValue: `${g.minute}'` }, athletesInvolved: [{ shortName: g.scorer, displayName: g.scorer }] });
+	}
+	for (const r of spec.reds ?? []) {
+		if (now < r.at) continue;
+		details.push({ redCard: true, type: { text: "Red Card" }, team: { id: sideId(r.side) }, clock: { displayValue: `${r.minute}'` }, athletesInvolved: [{ shortName: r.player, displayName: r.player }] });
+	}
+	const status = { type: { state, name }, period, clock };
 	return {
 		id: spec.id,
-		date: spec.date,
-		status: { type: { state: "pre" } },
+		date: new Date(spec.kickoffMs).toISOString(),
+		status,
 		competitions: [
 			{
-				status: { type: { state: "pre" } },
+				status,
 				competitors: [
-					{ homeAway: "home", score: "0", team: { id: spec.homeId, abbreviation: spec.homeAbbr, displayName: spec.homeAbbr } },
-					{ homeAway: "away", score: "0", team: { id: spec.awayId, abbreviation: spec.awayAbbr, displayName: spec.awayAbbr } },
+					{ homeAway: "home", score: String(homeScore), team: { id: spec.homeId, abbreviation: spec.homeAbbr, displayName: spec.homeAbbr } },
+					{ homeAway: "away", score: String(awayScore), team: { id: spec.awayId, abbreviation: spec.awayAbbr, displayName: spec.awayAbbr } },
 				],
+				details,
 				venue: { fullName: "Fake Match (debug harness)" },
 			},
 		],
 	};
 }
 
-/** POST /debug/fake-match — schedule (or clear) the synthetic fixture. Body:
- *   { minutes?=5, homeId?="18206"(ORL), homeAbbr?="ORL", awayId?="15360"(CHI), awayAbbr?="CHI" } → sets a
- *   kickoff `minutes` from now (inside the 20-min LA-start window ⇒ fires on the NEXT cron tick), OR
- *   { clear:true } → removes the flag. Secret-gated. Brother-safe by team choice (the gate excludes
- *   anyone without that team's alerts). Each call uses a fresh matchId so re-tests aren't KV-deduped. */
+/** POST /debug/fake-match — schedule (or clear) a FULL synthetic match. Default script (both teams 2
+ *  goals + an away red card + one away goal DISALLOWED by VAR): kickoff +2m, then an event every `gapSec`
+ *  (default 90s so each lands on its own cron tick): HOME goal, AWAY goal, AWAY red, AWAY goal→disallowed a
+ *  gap later (VAR correction), HOME goal, AWAY goal, then FT. ~14 min total; final HOME 2–2 AWAY.
+ *  Body: { gapSec?=90, homeId?="18206"(ORL), homeAbbr?, awayId?="15360"(CHI), awayAbbr? } | { clear:true }.
+ *  Secret-gated. Brother-safe by team choice. Fresh matchId per call so re-tests aren't KV-deduped. */
 async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
 		return new Response("forbidden", { status: 403 });
 	}
-	let p: { minutes?: number; homeId?: string; homeAbbr?: string; awayId?: string; awayAbbr?: string; clear?: boolean } = {};
+	let p: { gapSec?: number; homeId?: string; homeAbbr?: string; awayId?: string; awayAbbr?: string; clear?: boolean } = {};
 	try {
 		p = (await request.json()) as typeof p;
 	} catch {
@@ -711,19 +755,39 @@ async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 		await env.MATCH_STATE.delete("debug:fake-match");
 		return j({ cleared: true });
 	}
-	const minutes = p.minutes ?? 5;
+	const gap = (p.gapSec ?? 90) * 1000;
+	const now = Date.now();
+	const kickoffMs = now + 2 * 60_000; // kickoff 2 min out (LA-start fires now, inside the 20-min window)
+	const cm = (t: number) => Math.max(1, Math.round((t - kickoffMs) / 60_000)); // cosmetic match-clock minute
+	const goals: FakeGoal[] = [];
+	const reds: FakeRed[] = [];
+	let t = kickoffMs + gap;
+	goals.push({ at: t, side: "home", scorer: "A. Rodman", minute: cm(t) }); t += gap;
+	goals.push({ at: t, side: "away", scorer: "B. Hatch", minute: cm(t) }); t += gap;
+	reds.push({ at: t, side: "away", player: "C. Sonnett", minute: cm(t) }); t += gap;
+	const varAt = t; // away goal that VAR disallows a gap later (a clean score decrease to fire the correction)
+	goals.push({ at: varAt, side: "away", scorer: "D. Smith (VAR)", minute: cm(varAt), disallowedAt: varAt + gap }); t += 2 * gap;
+	goals.push({ at: t, side: "home", scorer: "E. Shaw", minute: cm(t) }); t += gap;
+	goals.push({ at: t, side: "away", scorer: "F. Lavelle", minute: cm(t) }); t += gap;
+	const ftMs = t + gap;
 	const spec: FakeMatchSpec = {
-		id: `fakematch-${Date.now()}`,
-		date: new Date(Date.now() + minutes * 60_000).toISOString(),
-		homeId: p.homeId ?? "18206",
-		homeAbbr: p.homeAbbr ?? "ORL",
-		awayId: p.awayId ?? "15360",
-		awayAbbr: p.awayAbbr ?? "CHI",
+		id: `fakematch-${now}`,
+		homeId: p.homeId ?? "18206", homeAbbr: p.homeAbbr ?? "ORL",
+		awayId: p.awayId ?? "15360", awayAbbr: p.awayAbbr ?? "CHI",
+		kickoffMs, ftMs, goals, reds,
 	};
-	await env.MATCH_STATE.put("debug:fake-match", JSON.stringify(spec), { expirationTtl: minutes * 60 + 600 });
+	await env.MATCH_STATE.put("debug:fake-match", JSON.stringify(spec), { expirationTtl: Math.ceil((ftMs - now) / 1000) + 600 });
+	const rel = (ms: number) => `+${Math.round((ms - now) / 60_000)}m`;
 	return j({
-		scheduled: spec,
-		note: `Kickoff in ${minutes}m (inside the 20-min LA-start window). The next cron tick should log "enqueued LA start ${spec.homeAbbr} vs ${spec.awayAbbr}" → "drained … 1 sent". You need alerts ON for ${spec.homeAbbr} or ${spec.awayAbbr} + Live Activities enabled + a registered start token.`,
+		scheduled: { id: spec.id, teams: `${spec.homeAbbr} v ${spec.awayAbbr}`, gapSec: gap / 1000 },
+		timeline: [
+			`LA-start ~now (card + buzz)`,
+			`kickoff ${rel(kickoffMs)}`,
+			...goals.map((g) => `${g.side === "home" ? spec.homeAbbr : spec.awayAbbr} goal ${g.scorer} ${rel(g.at)}${g.disallowedAt ? ` → VAR DISALLOW ${rel(g.disallowedAt)}` : ""}`),
+			...reds.map((r) => `${r.side === "home" ? spec.homeAbbr : spec.awayAbbr} RED ${r.player} ${rel(r.at)}`),
+			`FT ${rel(ftMs)} (final ${spec.homeAbbr} 2–2 ${spec.awayAbbr})`,
+		],
+		note: `Needs alerts ON for ${spec.homeAbbr} or ${spec.awayAbbr} + Live Activities + a start token. Watch the card for scorers under each side, a red-card mark on ${spec.awayAbbr}, the VAR score roll-back, and FT.`,
 	});
 }
 
