@@ -343,6 +343,15 @@ export default {
 			return handleTestBroadcast(request, env);
 		}
 
+		// DEBUG HARNESS: schedule a SYNTHETIC fixture the cron discovers on its own → exercises the FULL
+		// organic LA-start path (kickoff-window gate → startTokensForTeams preference gate → Queue enqueue
+		// → consumer drain → APNs → device) WITHOUT a real game. This is the ONLY on-demand way to test the
+		// queue path — /test-activity uses the inline send, which can't reproduce a queue-path bug. Brother-
+		// safe by the real gate (use teams they don't follow). See runWatch's readFakeMatch. Secret-gated.
+		if (request.method === "POST" && url.pathname === "/debug/fake-match") {
+			return handleFakeMatch(request, env);
+		}
+
 		return new Response("Not found.", { status: 404 });
 	},
 
@@ -586,8 +595,11 @@ async function runWatch(env: Env): Promise<void> {
 
 	// SEPARATE pass (not tangled into detectEvents): remote-start a Live Activity for any match
 	// kicking off within the next ~5 min that a signed-in user has alerts ON for. KV-deduped.
+	// DEBUG: a KV-flagged synthetic fixture (POST /debug/fake-match) is appended HERE ONLY — the LA-start
+	// pass sees it, the V1/lineup/NT passes above do NOT (they used `events`), so it can't spoof a goal.
 	try {
-		await startUpcomingActivities(env, events, sb, apns);
+		const fake = await readFakeMatch(env);
+		await startUpcomingActivities(env, fake ? [...events, fake] : events, sb, apns);
 	} catch (err) {
 		console.log(`[watcher] LA start pass failed: ${err}`);
 	}
@@ -651,6 +663,68 @@ async function syncLiveActivity(
 		console.log(`[watcher] LA broadcast update ${match.eventId}: ${r.ok ? "ok" : `${r.status} ${r.reason ?? ""}`}`);
 		await env.MATCH_STATE.put(rsKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
 	}
+}
+
+/** DEBUG HARNESS: the synthetic fixture the cron injects into the LA-start pass, or null when the
+ *  `debug:fake-match` KV flag isn't set. Shaped as a minimal ScoreboardEvent — only the fields the
+ *  LA-start pass reads (date for kickoffMs; competitions[0].competitors for upcomingInfo). Real ESPN
+ *  team ids so `startTokensForTeams` matches a real `team_alert_preferences` row. Set via
+ *  POST /debug/fake-match; auto-expires. Fed ONLY to startUpcomingActivities (see runWatch). */
+interface FakeMatchSpec { id: string; date: string; homeId: string; homeAbbr: string; awayId: string; awayAbbr: string }
+async function readFakeMatch(env: Env): Promise<ScoreboardEvent | null> {
+	const spec = (await env.MATCH_STATE.get("debug:fake-match", "json")) as FakeMatchSpec | null;
+	if (!spec) return null;
+	return {
+		id: spec.id,
+		date: spec.date,
+		status: { type: { state: "pre" } },
+		competitions: [
+			{
+				status: { type: { state: "pre" } },
+				competitors: [
+					{ homeAway: "home", score: "0", team: { id: spec.homeId, abbreviation: spec.homeAbbr, displayName: spec.homeAbbr } },
+					{ homeAway: "away", score: "0", team: { id: spec.awayId, abbreviation: spec.awayAbbr, displayName: spec.awayAbbr } },
+				],
+				venue: { fullName: "Fake Match (debug harness)" },
+			},
+		],
+	};
+}
+
+/** POST /debug/fake-match — schedule (or clear) the synthetic fixture. Body:
+ *   { minutes?=5, homeId?="18206"(ORL), homeAbbr?="ORL", awayId?="15360"(CHI), awayAbbr?="CHI" } → sets a
+ *   kickoff `minutes` from now (inside the 20-min LA-start window ⇒ fires on the NEXT cron tick), OR
+ *   { clear:true } → removes the flag. Secret-gated. Brother-safe by team choice (the gate excludes
+ *   anyone without that team's alerts). Each call uses a fresh matchId so re-tests aren't KV-deduped. */
+async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
+	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
+		return new Response("forbidden", { status: 403 });
+	}
+	let p: { minutes?: number; homeId?: string; homeAbbr?: string; awayId?: string; awayAbbr?: string; clear?: boolean } = {};
+	try {
+		p = (await request.json()) as typeof p;
+	} catch {
+		/* empty body → defaults */
+	}
+	const j = (body: unknown, status = 200) => new Response(JSON.stringify(body, null, 2), { status, headers: { "Content-Type": "application/json" } });
+	if (p.clear) {
+		await env.MATCH_STATE.delete("debug:fake-match");
+		return j({ cleared: true });
+	}
+	const minutes = p.minutes ?? 5;
+	const spec: FakeMatchSpec = {
+		id: `fakematch-${Date.now()}`,
+		date: new Date(Date.now() + minutes * 60_000).toISOString(),
+		homeId: p.homeId ?? "18206",
+		homeAbbr: p.homeAbbr ?? "ORL",
+		awayId: p.awayId ?? "15360",
+		awayAbbr: p.awayAbbr ?? "CHI",
+	};
+	await env.MATCH_STATE.put("debug:fake-match", JSON.stringify(spec), { expirationTtl: minutes * 60 + 600 });
+	return j({
+		scheduled: spec,
+		note: `Kickoff in ${minutes}m (inside the 20-min LA-start window). The next cron tick should log "enqueued LA start ${spec.homeAbbr} vs ${spec.awayAbbr}" → "drained … 1 sent". You need alerts ON for ${spec.homeAbbr} or ${spec.awayAbbr} + Live Activities enabled + a registered start token.`,
+	});
 }
 
 /** SEPARATE start trigger (NOT detectEvents): for matches ≤5 min pre-kickoff, remote-start a Live
