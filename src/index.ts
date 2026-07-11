@@ -230,7 +230,12 @@ async function enqueueLaStart(
 	const messages = buildMessages(
 		{
 			kind: "la-start",
-			payload: buildStartAps(attrs, state, undefined, alert, inputPushChannel),
+			// buildStartAps returns the CONTENTS of `aps`; the wire needs `{ aps: {…} }`. The inline
+			// startLiveActivity path (postLiveActivity) and V1's toPayload both wrap it — the 7/9 Queues
+			// redesign moved la-start onto the queue and dropped the wrapper, so every queued start went
+			// out with NO `aps` envelope → APNs 200s (`1 sent`) but iOS silently drops the malformed
+			// Live Activity push. THE root cause of the 7/10 organic no-shows (device-diagnosed 7/11).
+			payload: { aps: buildStartAps(attrs, state, undefined, alert, inputPushChannel) },
 			apnsTopic: liveTopic(apns),
 			apnsPushType: "liveactivity",
 			pruneTable: "live_activity_start_tokens",
