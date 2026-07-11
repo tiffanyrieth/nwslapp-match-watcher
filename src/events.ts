@@ -43,7 +43,7 @@ export interface ScoreboardEvent {
  *  booleans (live-verified 2026-07-05: `redCard`/`yellowCard`/`penaltyKick`/`ownGoal` all
  *  present on every card entry, plus `type:{id,text}`) — detection keys on the BOOLEANS,
  *  never on text matching (the build-25 lesson: `contains("red")` matched "scoRED"). */
-interface ScoreboardDetail {
+export interface ScoreboardDetail {
 	scoringPlay?: boolean;
 	redCard?: boolean;
 	yellowCard?: boolean;

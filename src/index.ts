@@ -36,6 +36,7 @@ import {
 	toPayload,
 	type Match,
 	type MatchEvent,
+	type ScoreboardDetail,
 	type ScoreboardEvent,
 	type StoredState,
 } from "./events";
@@ -415,7 +416,10 @@ async function refetchMatch(env: Env, eventId: string): Promise<Match | null> {
 			return null;
 		}
 		const evs = ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
-		const found = evs.find((e) => e.id === eventId);
+		// DEBUG: the VAR-correction re-poll must also see the synthetic fixture (it's injected client-side,
+		// not in the real proxy scoreboard) — else a fake disallow could never confirm.
+		const fake = await readFakeMatch(env);
+		const found = fake && fake.id === eventId ? fake : evs.find((e) => e.id === eventId);
 		return found ? parseMatch(found) : null;
 	} catch (err) {
 		console.log(`[watcher] correction re-poll threw: ${err}`);
@@ -677,21 +681,39 @@ async function syncLiveActivity(
  *  gate on a real `team_alert_preferences` row. `date` = kickoffMs so `kickoffMs(event)` drives the
  *  LA-start 20-min window. Shapes match what parseMatch/detectEvents read (status.type.state/name,
  *  status.period, status.clock[sec], competitors[].score). */
+interface FakeGoal { at: number; side: "home" | "away"; scorer: string; minute: number; disallowedAt?: number }
+interface FakeRed { at: number; side: "home" | "away"; player: string; minute: number }
 interface FakeMatchSpec {
 	id: string; homeId: string; homeAbbr: string; awayId: string; awayAbbr: string;
-	kickoffMs: number; goalMs?: number; ftMs?: number;
+	kickoffMs: number; ftMs: number;
+	goals: FakeGoal[]; reds: FakeRed[];
 }
 async function readFakeMatch(env: Env): Promise<ScoreboardEvent | null> {
 	const spec = (await env.MATCH_STATE.get("debug:fake-match", "json")) as FakeMatchSpec | null;
 	if (!spec) return null;
 	const now = Date.now();
-	let state = "pre", name = "STATUS_SCHEDULED", period = 0, clock = 0, homeScore = "0";
-	if (spec.ftMs && now >= spec.ftMs) {
-		state = "post"; name = "STATUS_FULL_TIME"; period = 2; clock = 0; homeScore = "1";
+	let state = "pre", name = "STATUS_SCHEDULED", period = 0, clock = 0;
+	if (now >= spec.ftMs) {
+		state = "post"; name = "STATUS_FULL_TIME"; period = 2;
 	} else if (now >= spec.kickoffMs) {
 		state = "in"; name = "STATUS_FIRST_HALF"; period = 1;
 		clock = Math.floor((now - spec.kickoffMs) / 1000); // seconds elapsed
-		if (spec.goalMs && now >= spec.goalMs) homeScore = "1";
+	}
+	// Build the scoreboard `details` (scoring plays + red cards) + running score AS OF `now` from the
+	// timeline. A goal with `disallowedAt` in the past is REMOVED (score decrements + its play drops) → a
+	// clean score DECREASE the watcher reads as a VAR correction. parsePlays/parseCards read these exact fields.
+	const sideId = (s: "home" | "away") => (s === "home" ? spec.homeId : spec.awayId);
+	const details: ScoreboardDetail[] = [];
+	let homeScore = 0, awayScore = 0;
+	for (const g of spec.goals ?? []) {
+		if (now < g.at) continue;                               // not scored yet
+		if (g.disallowedAt && now >= g.disallowedAt) continue;  // VAR-disallowed → gone from score + card
+		if (g.side === "home") homeScore++; else awayScore++;
+		details.push({ scoringPlay: true, team: { id: sideId(g.side) }, clock: { displayValue: `${g.minute}'` }, athletesInvolved: [{ shortName: g.scorer, displayName: g.scorer }] });
+	}
+	for (const r of spec.reds ?? []) {
+		if (now < r.at) continue;
+		details.push({ redCard: true, type: { text: "Red Card" }, team: { id: sideId(r.side) }, clock: { displayValue: `${r.minute}'` }, athletesInvolved: [{ shortName: r.player, displayName: r.player }] });
 	}
 	const status = { type: { state, name }, period, clock };
 	return {
@@ -702,26 +724,27 @@ async function readFakeMatch(env: Env): Promise<ScoreboardEvent | null> {
 			{
 				status,
 				competitors: [
-					{ homeAway: "home", score: homeScore, team: { id: spec.homeId, abbreviation: spec.homeAbbr, displayName: spec.homeAbbr } },
-					{ homeAway: "away", score: "0", team: { id: spec.awayId, abbreviation: spec.awayAbbr, displayName: spec.awayAbbr } },
+					{ homeAway: "home", score: String(homeScore), team: { id: spec.homeId, abbreviation: spec.homeAbbr, displayName: spec.homeAbbr } },
+					{ homeAway: "away", score: String(awayScore), team: { id: spec.awayId, abbreviation: spec.awayAbbr, displayName: spec.awayAbbr } },
 				],
+				details,
 				venue: { fullName: "Fake Match (debug harness)" },
 			},
 		],
 	};
 }
 
-/** POST /debug/fake-match — schedule (or clear) the synthetic fixture + its timeline. Body:
- *   { kickoffMin?=3, goalAfterMin?=3, ftAfterMin?=3, homeId?="18206"(ORL), homeAbbr?, awayId?="15360"(CHI),
- *     awayAbbr? } → LA-start fires ~now (kickoff within the 20-min window), kickoff at now+kickoffMin,
- *     home goal at kickoff+goalAfterMin (match-clock ~goalAfterMin'), FT at goal+ftAfterMin; OR
- *   { clear:true }. Secret-gated. Brother-safe by team choice (the gate excludes non-followers). Fresh
- *   matchId per call so re-tests aren't KV-deduped. */
+/** POST /debug/fake-match — schedule (or clear) a FULL synthetic match. Default script (both teams 2
+ *  goals + an away red card + one away goal DISALLOWED by VAR): kickoff +2m, then an event every `gapSec`
+ *  (default 90s so each lands on its own cron tick): HOME goal, AWAY goal, AWAY red, AWAY goal→disallowed a
+ *  gap later (VAR correction), HOME goal, AWAY goal, then FT. ~14 min total; final HOME 2–2 AWAY.
+ *  Body: { gapSec?=90, homeId?="18206"(ORL), homeAbbr?, awayId?="15360"(CHI), awayAbbr? } | { clear:true }.
+ *  Secret-gated. Brother-safe by team choice. Fresh matchId per call so re-tests aren't KV-deduped. */
 async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
 		return new Response("forbidden", { status: 403 });
 	}
-	let p: { kickoffMin?: number; goalAfterMin?: number; ftAfterMin?: number; homeId?: string; homeAbbr?: string; awayId?: string; awayAbbr?: string; clear?: boolean } = {};
+	let p: { gapSec?: number; homeId?: string; homeAbbr?: string; awayId?: string; awayAbbr?: string; clear?: boolean } = {};
 	try {
 		p = (await request.json()) as typeof p;
 	} catch {
@@ -732,21 +755,39 @@ async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 		await env.MATCH_STATE.delete("debug:fake-match");
 		return j({ cleared: true });
 	}
-	const km = p.kickoffMin ?? 3, gm = p.goalAfterMin ?? 3, fm = p.ftAfterMin ?? 3;
-	const kickoffMs = Date.now() + km * 60_000;
-	const goalMs = kickoffMs + gm * 60_000;
-	const ftMs = goalMs + fm * 60_000;
+	const gap = (p.gapSec ?? 90) * 1000;
+	const now = Date.now();
+	const kickoffMs = now + 2 * 60_000; // kickoff 2 min out (LA-start fires now, inside the 20-min window)
+	const cm = (t: number) => Math.max(1, Math.round((t - kickoffMs) / 60_000)); // cosmetic match-clock minute
+	const goals: FakeGoal[] = [];
+	const reds: FakeRed[] = [];
+	let t = kickoffMs + gap;
+	goals.push({ at: t, side: "home", scorer: "A. Rodman", minute: cm(t) }); t += gap;
+	goals.push({ at: t, side: "away", scorer: "B. Hatch", minute: cm(t) }); t += gap;
+	reds.push({ at: t, side: "away", player: "C. Sonnett", minute: cm(t) }); t += gap;
+	const varAt = t; // away goal that VAR disallows a gap later (a clean score decrease to fire the correction)
+	goals.push({ at: varAt, side: "away", scorer: "D. Smith (VAR)", minute: cm(varAt), disallowedAt: varAt + gap }); t += 2 * gap;
+	goals.push({ at: t, side: "home", scorer: "E. Shaw", minute: cm(t) }); t += gap;
+	goals.push({ at: t, side: "away", scorer: "F. Lavelle", minute: cm(t) }); t += gap;
+	const ftMs = t + gap;
 	const spec: FakeMatchSpec = {
-		id: `fakematch-${Date.now()}`,
+		id: `fakematch-${now}`,
 		homeId: p.homeId ?? "18206", homeAbbr: p.homeAbbr ?? "ORL",
 		awayId: p.awayId ?? "15360", awayAbbr: p.awayAbbr ?? "CHI",
-		kickoffMs, goalMs, ftMs,
+		kickoffMs, ftMs, goals, reds,
 	};
-	await env.MATCH_STATE.put("debug:fake-match", JSON.stringify(spec), { expirationTtl: (km + gm + fm + 15) * 60 });
+	await env.MATCH_STATE.put("debug:fake-match", JSON.stringify(spec), { expirationTtl: Math.ceil((ftMs - now) / 1000) + 600 });
+	const rel = (ms: number) => `+${Math.round((ms - now) / 60_000)}m`;
 	return j({
-		scheduled: spec,
-		timeline: `LA-start ~now · kickoff +${km}m · ${spec.homeAbbr} goal +${km + gm}m · FT +${km + gm + fm}m`,
-		note: `Needs alerts ON for ${spec.homeAbbr} or ${spec.awayAbbr} + Live Activities enabled + a start token. Watch: enqueued/drained LA start → LA broadcast update (kickoff) → LA broadcast update (goal, score 1-0) → LA broadcast END.`,
+		scheduled: { id: spec.id, teams: `${spec.homeAbbr} v ${spec.awayAbbr}`, gapSec: gap / 1000 },
+		timeline: [
+			`LA-start ~now (card + buzz)`,
+			`kickoff ${rel(kickoffMs)}`,
+			...goals.map((g) => `${g.side === "home" ? spec.homeAbbr : spec.awayAbbr} goal ${g.scorer} ${rel(g.at)}${g.disallowedAt ? ` → VAR DISALLOW ${rel(g.disallowedAt)}` : ""}`),
+			...reds.map((r) => `${r.side === "home" ? spec.homeAbbr : spec.awayAbbr} RED ${r.player} ${rel(r.at)}`),
+			`FT ${rel(ftMs)} (final ${spec.homeAbbr} 2–2 ${spec.awayAbbr})`,
+		],
+		note: `Needs alerts ON for ${spec.homeAbbr} or ${spec.awayAbbr} + Live Activities + a start token. Watch the card for scorers under each side, a red-card mark on ${spec.awayAbbr}, the VAR score roll-back, and FT.`,
 	});
 }
 
