@@ -230,7 +230,12 @@ async function enqueueLaStart(
 	const messages = buildMessages(
 		{
 			kind: "la-start",
-			payload: buildStartAps(attrs, state, undefined, alert, inputPushChannel),
+			// buildStartAps returns the CONTENTS of `aps`; the wire needs `{ aps: {…} }`. The inline
+			// startLiveActivity path (postLiveActivity) and V1's toPayload both wrap it — the 7/9 Queues
+			// redesign moved la-start onto the queue and dropped the wrapper, so every queued start went
+			// out with NO `aps` envelope → APNs 200s (`1 sent`) but iOS silently drops the malformed
+			// Live Activity push. THE root cause of the 7/10 organic no-shows (device-diagnosed 7/11).
+			payload: { aps: buildStartAps(attrs, state, undefined, alert, inputPushChannel) },
 			apnsTopic: liveTopic(apns),
 			apnsPushType: "liveactivity",
 			pruneTable: "live_activity_start_tokens",
@@ -336,6 +341,15 @@ export default {
 		// sandbox host for a USB debug build. See handleTestBroadcast.
 		if (request.method === "POST" && url.pathname === "/test-broadcast") {
 			return handleTestBroadcast(request, env);
+		}
+
+		// DEBUG HARNESS: schedule a SYNTHETIC fixture the cron discovers on its own → exercises the FULL
+		// organic LA-start path (kickoff-window gate → startTokensForTeams preference gate → Queue enqueue
+		// → consumer drain → APNs → device) WITHOUT a real game. This is the ONLY on-demand way to test the
+		// queue path — /test-activity uses the inline send, which can't reproduce a queue-path bug. Brother-
+		// safe by the real gate (use teams they don't follow). See runWatch's readFakeMatch. Secret-gated.
+		if (request.method === "POST" && url.pathname === "/debug/fake-match") {
+			return handleFakeMatch(request, env);
 		}
 
 		return new Response("Not found.", { status: 404 });
@@ -581,8 +595,11 @@ async function runWatch(env: Env): Promise<void> {
 
 	// SEPARATE pass (not tangled into detectEvents): remote-start a Live Activity for any match
 	// kicking off within the next ~5 min that a signed-in user has alerts ON for. KV-deduped.
+	// DEBUG: a KV-flagged synthetic fixture (POST /debug/fake-match) is appended HERE ONLY — the LA-start
+	// pass sees it, the V1/lineup/NT passes above do NOT (they used `events`), so it can't spoof a goal.
 	try {
-		await startUpcomingActivities(env, events, sb, apns);
+		const fake = await readFakeMatch(env);
+		await startUpcomingActivities(env, fake ? [...events, fake] : events, sb, apns);
 	} catch (err) {
 		console.log(`[watcher] LA start pass failed: ${err}`);
 	}
@@ -648,6 +665,68 @@ async function syncLiveActivity(
 	}
 }
 
+/** DEBUG HARNESS: the synthetic fixture the cron injects into the LA-start pass, or null when the
+ *  `debug:fake-match` KV flag isn't set. Shaped as a minimal ScoreboardEvent — only the fields the
+ *  LA-start pass reads (date for kickoffMs; competitions[0].competitors for upcomingInfo). Real ESPN
+ *  team ids so `startTokensForTeams` matches a real `team_alert_preferences` row. Set via
+ *  POST /debug/fake-match; auto-expires. Fed ONLY to startUpcomingActivities (see runWatch). */
+interface FakeMatchSpec { id: string; date: string; homeId: string; homeAbbr: string; awayId: string; awayAbbr: string }
+async function readFakeMatch(env: Env): Promise<ScoreboardEvent | null> {
+	const spec = (await env.MATCH_STATE.get("debug:fake-match", "json")) as FakeMatchSpec | null;
+	if (!spec) return null;
+	return {
+		id: spec.id,
+		date: spec.date,
+		status: { type: { state: "pre" } },
+		competitions: [
+			{
+				status: { type: { state: "pre" } },
+				competitors: [
+					{ homeAway: "home", score: "0", team: { id: spec.homeId, abbreviation: spec.homeAbbr, displayName: spec.homeAbbr } },
+					{ homeAway: "away", score: "0", team: { id: spec.awayId, abbreviation: spec.awayAbbr, displayName: spec.awayAbbr } },
+				],
+				venue: { fullName: "Fake Match (debug harness)" },
+			},
+		],
+	};
+}
+
+/** POST /debug/fake-match — schedule (or clear) the synthetic fixture. Body:
+ *   { minutes?=5, homeId?="18206"(ORL), homeAbbr?="ORL", awayId?="15360"(CHI), awayAbbr?="CHI" } → sets a
+ *   kickoff `minutes` from now (inside the 20-min LA-start window ⇒ fires on the NEXT cron tick), OR
+ *   { clear:true } → removes the flag. Secret-gated. Brother-safe by team choice (the gate excludes
+ *   anyone without that team's alerts). Each call uses a fresh matchId so re-tests aren't KV-deduped. */
+async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
+	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
+		return new Response("forbidden", { status: 403 });
+	}
+	let p: { minutes?: number; homeId?: string; homeAbbr?: string; awayId?: string; awayAbbr?: string; clear?: boolean } = {};
+	try {
+		p = (await request.json()) as typeof p;
+	} catch {
+		/* empty body → defaults */
+	}
+	const j = (body: unknown, status = 200) => new Response(JSON.stringify(body, null, 2), { status, headers: { "Content-Type": "application/json" } });
+	if (p.clear) {
+		await env.MATCH_STATE.delete("debug:fake-match");
+		return j({ cleared: true });
+	}
+	const minutes = p.minutes ?? 5;
+	const spec: FakeMatchSpec = {
+		id: `fakematch-${Date.now()}`,
+		date: new Date(Date.now() + minutes * 60_000).toISOString(),
+		homeId: p.homeId ?? "18206",
+		homeAbbr: p.homeAbbr ?? "ORL",
+		awayId: p.awayId ?? "15360",
+		awayAbbr: p.awayAbbr ?? "CHI",
+	};
+	await env.MATCH_STATE.put("debug:fake-match", JSON.stringify(spec), { expirationTtl: minutes * 60 + 600 });
+	return j({
+		scheduled: spec,
+		note: `Kickoff in ${minutes}m (inside the 20-min LA-start window). The next cron tick should log "enqueued LA start ${spec.homeAbbr} vs ${spec.awayAbbr}" → "drained … 1 sent". You need alerts ON for ${spec.homeAbbr} or ${spec.awayAbbr} + Live Activities enabled + a registered start token.`,
+	});
+}
+
 /** SEPARATE start trigger (NOT detectEvents): for matches ≤5 min pre-kickoff, remote-start a Live
  *  Activity for everyone with alerts ON for a participating team + a push-to-start token. KV-deduped. */
 async function startUpcomingActivities(
@@ -675,15 +754,16 @@ async function startUpcomingActivities(
 		const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr);
 		const state = preContentState(kickoffLabel(ko));
 		// ARRIVAL-BUZZ LAW (corrected 2026-07-09 against the 7/5 A/B logs — see docs/live-activity-v2.md §3):
-		// the start push MUST carry an `alert`, AND a fully-silent `sound: ""` is UNRELIABLE — on real games
-		// it often never presents (owner A/B: silent → "does not show up"; sounded → "went straight to my
-		// lock screen"). Likely iOS enforces a ONE-TIME arrival buzz for a persistent, power-drawing
-		// lock-screen surface. So the start BUZZES ONCE (`sound: "default"`); every UPDATE/END stays silent
-		// (alert-less) — the Athletic pattern. The earlier "sound:'' renders buzz-free" claim was overfit.
+		// TWO INDEPENDENT requirements — proven separately 7/11, do NOT conflate them (this is what
+		// wasted days): (1) RENDER needs both an `alert` object [render law, 7/4] AND a correct `{ aps }`
+		// envelope [enqueueLaStart — the 7/10 no-show was the missing wrapper, NOT the sound]. (2) BUZZ:
+		// `sound: "default"` = one arrival buzz; `sound: ""` renders but is SILENT. With the envelope
+		// fixed, "default" renders AND buzzes (device-verified 7/11, fake-match harness). Updates/end
+		// stay alert-less (silent) — the Athletic pattern.
 		const startAlert = {
 			title: `${info.homeAbbr} vs ${info.awayAbbr}`,
 			body: "Live match card is on your lock screen.",
-			sound: "default",
+			sound: "default", // one arrival buzz; "" renders but is SILENT (device-verified 7/11)
 		};
 		// The start push is the ONE per-device Live Activity fan-out per match → it rides the Queues rail
 		// like V1. `channelId` (iOS 18 broadcast, added in the broadcast phase) goes in the start payload so
@@ -724,7 +804,7 @@ async function maybeStartNationalActivity(
 	const startAlert = {
 		title: `${info.homeAbbr} vs ${info.awayAbbr}`,
 		body: "Live match card is on your lock screen.",
-		sound: "default",
+		sound: "default", // one arrival buzz; matches the club start (see startUpcomingActivities)
 	};
 	const channelId = await ensureMatchChannel(env, apns, info.matchId);
 	await enqueueLaStart(env, apns, attrs, state, startAlert, tokens, channelId);
@@ -911,6 +991,7 @@ async function handleTestBroadcast(request: Request, env: Env): Promise<Response
 		await env.MATCH_STATE.put(chanKey, created.channelId, { expirationTtl: MATCH_STATE_TTL });
 		const national = p.isNational !== false; // default true — this route is primarily the flag test
 		const attrs = attributesFor(matchId, p.h ?? "USA", p.a ?? "CAN", national ? "International" : "NWSL", national);
+		// Mirrors the REAL cron start payload (test what you fly): sound "default" = the shipped arrival-buzz value.
 		const startAlert = { title: `${p.h ?? "USA"} vs ${p.a ?? "CAN"}`, body: "Live match card is on your lock screen.", sound: "default" };
 		let tokens: string[];
 		try {
