@@ -299,8 +299,24 @@ async function sweepOrphanChannels(env: Env, apns: ApnsConfig): Promise<void> {
 
 export default {
 	// Cron entry point (configured in wrangler.jsonc: "* * * * *").
+	//
+	// Cloudflare's cron floor is 1 minute, but a live match wants ~30s reactions (goal/HT/FT
+	// latency). So instead of a Durable Object alarm we DOUBLE-POLL inside the one invocation:
+	// poll once, and IF a match is live/near-kickoff, wait 30s and poll again with a cache-bust
+	// (the fresh read the second poll needs — the proxy live TTL is 30s, so an un-busted re-poll
+	// would just re-read the same cached scoreboard). Gated on the live window, so the 23h/day
+	// with no match cost zero extra wall-time / ESPN hits. KV fire-once state chains the two polls
+	// naturally (poll 1 sees 0–0, poll 2 sees 1–0 → fires once, writes state).
 	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-		ctx.waitUntil(runWatch(env));
+		ctx.waitUntil(
+			(async () => {
+				const live = await runWatch(env); // first poll — rides the shared 30s edge cache
+				if (live) {
+					await sleep(30_000);
+					await runWatch(env, true); // second poll — cache-busted for a fresh ESPN read
+				}
+			})(),
+		);
 	},
 
 	// HTTP entry point: health + match-card render + the manual test-push trigger.
@@ -427,22 +443,28 @@ async function refetchMatch(env: Env, eventId: string): Promise<Match | null> {
 	}
 }
 
-/** One poll: scoreboard → per-match diff → event pushes. */
-async function runWatch(env: Env): Promise<void> {
+/**
+ * One poll: scoreboard → per-match diff → event pushes. Returns whether a match is currently in the
+ * live window (in-progress or within the ±kickoff window) — the caller uses it to decide whether to
+ * fire a second 30s poll this minute. `cacheBust` forces a fresh ESPN read (see `scheduled`): it adds
+ * a `_cb` param that misses the proxy's 30s live cache, the same trick the VAR re-poll uses.
+ */
+async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	const now = Date.now();
+	const cb = cacheBust ? `&_cb=${Date.now()}` : "";
 	let events: ScoreboardEvent[];
 	try {
-		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500`, {
+		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500${cb}`, {
 			headers: { Accept: "application/json" },
 		});
 		if (!res.ok) {
 			console.log(`[watcher] scoreboard fetch failed: ${res.status}`);
-			return;
+			return false;
 		}
 		events = ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
 	} catch (err) {
 		console.log(`[watcher] scoreboard fetch threw: ${err}`);
-		return;
+		return false;
 	}
 
 	// DEBUG HARNESS: inject the KV-flagged synthetic fixture into the FULL event list, so the cron's real
@@ -450,6 +472,16 @@ async function runWatch(env: Env): Promise<void> {
 	// exercising the whole organic V2 lifecycle. No-op unless POST /debug/fake-match set the flag.
 	const fakeEvent = await readFakeMatch(env);
 	if (fakeEvent) events = [...events, fakeEvent];
+
+	// Is any match in the live window (in-progress or near kickoff, excluding finished)? This is the
+	// signal `scheduled` uses to fire a second 30s poll this minute. Computed over the club scoreboard;
+	// the NT loop below ORs in any live NT match so an international window also gets the fast cadence.
+	let liveInWindow = events.some((event) => {
+		const ko = kickoffMs(event);
+		if (ko === null || now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) return false;
+		const state = event.status?.type?.state ?? event.competitions?.[0]?.status?.type?.state;
+		return state === "in" || state === "pre";
+	});
 
 	const sb = supabaseConfig(env);
 	const apns = apnsConfig(env);
@@ -541,7 +573,7 @@ async function runWatch(env: Env): Promise<void> {
 	for (const slug of NT_LEAGUES) {
 		let ntEvents: ScoreboardEvent[];
 		try {
-			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?league=${slug}&dates=${scoreboardWindow()}&limit=500`, {
+			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?league=${slug}&dates=${scoreboardWindow()}&limit=500${cb}`, {
 				headers: { Accept: "application/json" },
 			});
 			if (!res.ok) continue;
@@ -566,6 +598,7 @@ async function runWatch(env: Env): Promise<void> {
 
 			// Live-window gate for V1 detection + V2 broadcast sync.
 			if (now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) continue;
+			liveInWindow = true; // an in-window NT match → give the international window the 30s cadence too
 			const match = parseMatch(event);
 			if (!match) continue;
 			const key = `match:${match.eventId}`;
@@ -626,6 +659,8 @@ async function runWatch(env: Env): Promise<void> {
 	} catch (err) {
 		console.log(`[watcher] channel sweep failed: ${err}`);
 	}
+
+	return liveInWindow;
 }
 
 /** V2: BROADCAST the current match state to the match's channel — ONE request, Apple fans out to every
