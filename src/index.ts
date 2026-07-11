@@ -991,8 +991,8 @@ async function handleTestBroadcast(request: Request, env: Env): Promise<Response
 		await env.MATCH_STATE.put(chanKey, created.channelId, { expirationTtl: MATCH_STATE_TTL });
 		const national = p.isNational !== false; // default true — this route is primarily the flag test
 		const attrs = attributesFor(matchId, p.h ?? "USA", p.a ?? "CAN", national ? "International" : "NWSL", national);
-		// Mirrors the REAL cron start payload (test what you fly): sound "" = the 7/5 real-game-proven value.
-		const startAlert = { title: `${p.h ?? "USA"} vs ${p.a ?? "CAN"}`, body: "Live match card is on your lock screen.", sound: "" };
+		// Mirrors the REAL cron start payload (test what you fly): sound "default" = the shipped arrival-buzz value.
+		const startAlert = { title: `${p.h ?? "USA"} vs ${p.a ?? "CAN"}`, body: "Live match card is on your lock screen.", sound: "default" };
 		let tokens: string[];
 		try {
 			tokens = p.token ? [p.token] : await allStartTokens(sb);
