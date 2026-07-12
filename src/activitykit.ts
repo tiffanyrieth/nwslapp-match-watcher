@@ -33,6 +33,11 @@ export interface LiveContentState {
 	/** Per-side RED-card counts (yellows excluded by design). Omitted when 0. */
 	homeRedCards?: number;
 	awayRedCards?: number;
+	/** Football stoppage-time label ("45'+2'" / "90'+3'"), set ONLY in added time (numeric clock frozen
+	 *  at the 45:00/90:00 cap). The widget renders this verbatim instead of the self-ticking mm:ss timer
+	 *  (Apple's Text(timerInterval:) can't format football stoppage), refreshed each minute by a
+	 *  broadcast. Omitted during normal play (compact() drops it) → the widget uses the local clock. */
+	stoppageDisplay?: string;
 }
 
 /** Mirrors Swift MatchActivityAttributes (the static, set-once fields). */

@@ -164,7 +164,13 @@ const LINEUP_LEAD_MS = 75 * 60 * 1000;
 const LA_START_LEAD_MS = 20 * 60 * 1000; // remote-start the Activity ≤20 min before kickoff — the token
 // registration window (a device can take minutes to observe the Activity + upload its per-Activity token;
 // ≤5 min bled past kickoff and missed early goals). Doubles as the pre-match "SOON" glance card.
-const LA_RESYNC_MS = 10 * 60 * 1000; // clock-drift resync cadence (the widget's local timer ticks between)
+const LA_RESYNC_MS = 10 * 60 * 1000; // clock-drift resync FLOOR (the widget's local timer ticks between)
+// Also resync the moment the widget's anchor (clockStartEpoch) jumps ≥ this many seconds — ESPN flips
+// each half "live" several minutes LATE with the clock reset, so the anchor lurches at every kickoff /
+// second-half restart (and on mid-game ESPN corrections). Without this the card sat visibly behind for
+// up to the 10-min floor at the start of BOTH halves (owner-observed 2026-07-11). During smooth play the
+// anchor is stable → zero drift → no extra pushes; it only fires exactly when the card would be wrong.
+const LA_DRIFT_RESYNC_SEC = 30;
 const LA_DISMISS_AFTER_S = 15 * 60; // TEST-ONLY (/test-activity end): quick self-clean for test cards. The real cron omits dismissal-date → FT card lingers up to Apple's ~4h cap, user-dismissable.
 
 function apnsConfig(env: Env): ApnsConfig {
@@ -299,8 +305,24 @@ async function sweepOrphanChannels(env: Env, apns: ApnsConfig): Promise<void> {
 
 export default {
 	// Cron entry point (configured in wrangler.jsonc: "* * * * *").
+	//
+	// Cloudflare's cron floor is 1 minute, but a live match wants ~30s reactions (goal/HT/FT
+	// latency). So instead of a Durable Object alarm we DOUBLE-POLL inside the one invocation:
+	// poll once, and IF a match is live/near-kickoff, wait 30s and poll again with a cache-bust
+	// (the fresh read the second poll needs — the proxy live TTL is 30s, so an un-busted re-poll
+	// would just re-read the same cached scoreboard). Gated on the live window, so the 23h/day
+	// with no match cost zero extra wall-time / ESPN hits. KV fire-once state chains the two polls
+	// naturally (poll 1 sees 0–0, poll 2 sees 1–0 → fires once, writes state).
 	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-		ctx.waitUntil(runWatch(env));
+		ctx.waitUntil(
+			(async () => {
+				const live = await runWatch(env); // first poll — rides the shared 30s edge cache
+				if (live) {
+					await sleep(30_000);
+					await runWatch(env, true); // second poll — cache-busted for a fresh ESPN read
+				}
+			})(),
+		);
 	},
 
 	// HTTP entry point: health + match-card render + the manual test-push trigger.
@@ -427,22 +449,28 @@ async function refetchMatch(env: Env, eventId: string): Promise<Match | null> {
 	}
 }
 
-/** One poll: scoreboard → per-match diff → event pushes. */
-async function runWatch(env: Env): Promise<void> {
+/**
+ * One poll: scoreboard → per-match diff → event pushes. Returns whether a match is currently in the
+ * live window (in-progress or within the ±kickoff window) — the caller uses it to decide whether to
+ * fire a second 30s poll this minute. `cacheBust` forces a fresh ESPN read (see `scheduled`): it adds
+ * a `_cb` param that misses the proxy's 30s live cache, the same trick the VAR re-poll uses.
+ */
+async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	const now = Date.now();
+	const cb = cacheBust ? `&_cb=${Date.now()}` : "";
 	let events: ScoreboardEvent[];
 	try {
-		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500`, {
+		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500${cb}`, {
 			headers: { Accept: "application/json" },
 		});
 		if (!res.ok) {
 			console.log(`[watcher] scoreboard fetch failed: ${res.status}`);
-			return;
+			return false;
 		}
 		events = ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
 	} catch (err) {
 		console.log(`[watcher] scoreboard fetch threw: ${err}`);
-		return;
+		return false;
 	}
 
 	// DEBUG HARNESS: inject the KV-flagged synthetic fixture into the FULL event list, so the cron's real
@@ -450,6 +478,16 @@ async function runWatch(env: Env): Promise<void> {
 	// exercising the whole organic V2 lifecycle. No-op unless POST /debug/fake-match set the flag.
 	const fakeEvent = await readFakeMatch(env);
 	if (fakeEvent) events = [...events, fakeEvent];
+
+	// Is any match in the live window (in-progress or near kickoff, excluding finished)? This is the
+	// signal `scheduled` uses to fire a second 30s poll this minute. Computed over the club scoreboard;
+	// the NT loop below ORs in any live NT match so an international window also gets the fast cadence.
+	let liveInWindow = events.some((event) => {
+		const ko = kickoffMs(event);
+		if (ko === null || now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) return false;
+		const state = event.status?.type?.state ?? event.competitions?.[0]?.status?.type?.state;
+		return state === "in" || state === "pre";
+	});
 
 	const sb = supabaseConfig(env);
 	const apns = apnsConfig(env);
@@ -541,7 +579,7 @@ async function runWatch(env: Env): Promise<void> {
 	for (const slug of NT_LEAGUES) {
 		let ntEvents: ScoreboardEvent[];
 		try {
-			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?league=${slug}&dates=${scoreboardWindow()}&limit=500`, {
+			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?league=${slug}&dates=${scoreboardWindow()}&limit=500${cb}`, {
 				headers: { Accept: "application/json" },
 			});
 			if (!res.ok) continue;
@@ -566,6 +604,7 @@ async function runWatch(env: Env): Promise<void> {
 
 			// Live-window gate for V1 detection + V2 broadcast sync.
 			if (now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) continue;
+			liveInWindow = true; // an in-window NT match → give the international window the 30s cadence too
 			const match = parseMatch(event);
 			if (!match) continue;
 			const key = `match:${match.eventId}`;
@@ -626,6 +665,8 @@ async function runWatch(env: Env): Promise<void> {
 	} catch (err) {
 		console.log(`[watcher] channel sweep failed: ${err}`);
 	}
+
+	return liveInWindow;
 }
 
 /** V2: BROADCAST the current match state to the match's channel — ONE request, Apple fans out to every
@@ -644,6 +685,8 @@ async function syncLiveActivity(
 	if (!chanId) return; // no channel ⇒ no Activities were started for this match (or create failed)
 	const ended = match.state === "post";
 	const rsKey = `la-rs:${match.eventId}`;
+	const epochKey = `la-epoch:${match.eventId}`; // last-broadcast anchor, for drift-triggered resync
+	const stopKey = `la-stop:${match.eventId}`; // last-broadcast stoppage label, for the per-minute +N push
 	const state: LiveContentState = contentStateFromMatch(match, virtualKickoff);
 	const jwt = await apnsJwt(apns);
 
@@ -655,12 +698,32 @@ async function syncLiveActivity(
 		await deleteChannel(apns, jwt, chanId);
 		await env.MATCH_STATE.delete(channelKey(match.eventId));
 		await env.MATCH_STATE.delete(rsKey);
+		await env.MATCH_STATE.delete(epochKey);
+		await env.MATCH_STATE.delete(stopKey);
 		return;
 	}
 
-	// Broadcast on an event, or once the drift cadence elapses; between those the widget's local timer
-	// ticks on its own (no push). ONE broadcast reaches every subscriber regardless of how many.
+	// Broadcast on an event, when the anchor drifts (see below), or once the 10-min floor elapses;
+	// between those the widget's local timer ticks on its own (no push). ONE broadcast reaches every
+	// subscriber regardless of how many.
+	const epoch = state.clockStartEpoch; // the exact anchor the widget renders; undefined while paused
 	let resync = hadEvent;
+	// Drift-triggered resync: the anchor is stable during smooth play (the on-device timer tracks ESPN
+	// 1:1), but jumps ≥30s at each half's late live-flip / a mid-game correction — resync then so the
+	// card snaps within one tick instead of coasting behind for up to the 10-min floor.
+	if (!resync && epoch != null) {
+		const lastEpoch = await env.MATCH_STATE.get(epochKey);
+		if (lastEpoch != null && Math.abs(epoch - Number(lastEpoch)) >= LA_DRIFT_RESYNC_SEC) resync = true;
+	}
+	// Stoppage rollover: in added time the anchor is FROZEN (no drift), but stoppageDisplay ticks
+	// "90'+1'"→"+2'"… each minute — the only way the widget's static +N advances is a fresh broadcast,
+	// so resync whenever the label changes (entering, each minute, and leaving stoppage). Bounded: a
+	// handful of pushes per stoppage window, one broadcast reaching all subscribers.
+	const stoppage = state.stoppageDisplay ?? "";
+	if (!resync) {
+		const lastStop = (await env.MATCH_STATE.get(stopKey)) ?? "";
+		if (lastStop !== stoppage) resync = true;
+	}
 	if (!resync) {
 		const last = await env.MATCH_STATE.get(rsKey);
 		resync = !last || Date.now() - Number(last) >= LA_RESYNC_MS;
@@ -669,6 +732,9 @@ async function syncLiveActivity(
 		const r = await broadcastUpdate(apns, jwt, chanId, state);
 		console.log(`[watcher] LA broadcast update ${match.eventId}: ${r.ok ? "ok" : `${r.status} ${r.reason ?? ""}`}`);
 		await env.MATCH_STATE.put(rsKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
+		// Refresh the drift baseline to the anchor we just pushed (only while running — paused = no anchor).
+		if (epoch != null) await env.MATCH_STATE.put(epochKey, String(epoch), { expirationTtl: MATCH_STATE_TTL });
+		await env.MATCH_STATE.put(stopKey, stoppage, { expirationTtl: MATCH_STATE_TTL });
 	}
 }
 

@@ -71,6 +71,19 @@ function sideReds(m: Match, teamId: string): number | undefined {
 	return n > 0 ? n : undefined;
 }
 
+/** Football stoppage-time label from ANCHOR-based elapsed — mirrors Swift MatchClock.minuteLabel
+ *  EXACTLY (1-based current minute; fold past the period cap into "{cap}'+{n}'"). Returns undefined
+ *  during normal play (before the cap) so the widget keeps its self-ticking clock; only added time
+ *  ("45'+2'"/"90'+3'") needs a pushed string because ESPN freezes the numeric clock at the cap and
+ *  Apple's timer can't format stoppage. `period`: 1/2 regulation, 3/4 ET. */
+const REGULATION_CAP: Record<number, number> = { 1: 45, 2: 90, 3: 105, 4: 120 };
+function stoppageLabel(elapsedSec: number, period: number): string | undefined {
+	const cap = REGULATION_CAP[period];
+	if (cap == null) return undefined;
+	const displayMinute = Math.max(0, Math.floor(elapsedSec / 60)) + 1; // 1-based "current minute"
+	return displayMinute > cap ? `${cap}'+${displayMinute - cap}'` : undefined;
+}
+
 /** The current Live Activity content-state for a live/finished match (used for UPDATE / END).
  *  `virtualKickoff` (from StoredState) is the MONOTONIC anchor: ESPN freezes `status.clock` during
  *  stoppage, so re-basing `now − clock` per push snapped the widget clock back to 45:00 on every
@@ -80,17 +93,24 @@ export function contentStateFromMatch(m: Match, virtualKickoff?: number): LiveCo
 	const nowSec = Math.floor(Date.now() / 1000);
 	const running = phase === "live" || phase === "extraTime";
 	const staticLabel = phase === "halftime" ? "HT" : phase === "fulltime" ? "FT" : phase === "penalties" ? "PENS" : undefined;
+	const clockStartEpoch = running ? (virtualKickoff ?? nowSec - m.clock) : undefined;
+	// Stoppage label from the MONOTONIC anchor (not ESPN's frozen clock): while running past the cap,
+	// elapsed = now − clockStartEpoch keeps growing → "90'+1'", "+2'"… exactly like the in-app clock.
+	const stoppageDisplay = running && clockStartEpoch != null
+		? stoppageLabel(nowSec - clockStartEpoch, m.period)
+		: undefined;
 	return {
 		homeScore: m.home.score,
 		awayScore: m.away.score,
 		phase,
-		clockStartEpoch: running ? (virtualKickoff ?? nowSec - m.clock) : undefined,
+		clockStartEpoch,
 		staticLabel,
 		lastScorer: lastScorer(m),
 		homeScorers: sideScorers(m, m.home.id),
 		awayScorers: sideScorers(m, m.away.id),
 		homeRedCards: sideReds(m, m.home.id),
 		awayRedCards: sideReds(m, m.away.id),
+		stoppageDisplay,
 	};
 }
 
