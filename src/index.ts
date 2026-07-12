@@ -686,6 +686,7 @@ async function syncLiveActivity(
 	const ended = match.state === "post";
 	const rsKey = `la-rs:${match.eventId}`;
 	const epochKey = `la-epoch:${match.eventId}`; // last-broadcast anchor, for drift-triggered resync
+	const stopKey = `la-stop:${match.eventId}`; // last-broadcast stoppage label, for the per-minute +N push
 	const state: LiveContentState = contentStateFromMatch(match, virtualKickoff);
 	const jwt = await apnsJwt(apns);
 
@@ -698,6 +699,7 @@ async function syncLiveActivity(
 		await env.MATCH_STATE.delete(channelKey(match.eventId));
 		await env.MATCH_STATE.delete(rsKey);
 		await env.MATCH_STATE.delete(epochKey);
+		await env.MATCH_STATE.delete(stopKey);
 		return;
 	}
 
@@ -713,6 +715,15 @@ async function syncLiveActivity(
 		const lastEpoch = await env.MATCH_STATE.get(epochKey);
 		if (lastEpoch != null && Math.abs(epoch - Number(lastEpoch)) >= LA_DRIFT_RESYNC_SEC) resync = true;
 	}
+	// Stoppage rollover: in added time the anchor is FROZEN (no drift), but stoppageDisplay ticks
+	// "90'+1'"→"+2'"… each minute — the only way the widget's static +N advances is a fresh broadcast,
+	// so resync whenever the label changes (entering, each minute, and leaving stoppage). Bounded: a
+	// handful of pushes per stoppage window, one broadcast reaching all subscribers.
+	const stoppage = state.stoppageDisplay ?? "";
+	if (!resync) {
+		const lastStop = (await env.MATCH_STATE.get(stopKey)) ?? "";
+		if (lastStop !== stoppage) resync = true;
+	}
 	if (!resync) {
 		const last = await env.MATCH_STATE.get(rsKey);
 		resync = !last || Date.now() - Number(last) >= LA_RESYNC_MS;
@@ -723,6 +734,7 @@ async function syncLiveActivity(
 		await env.MATCH_STATE.put(rsKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
 		// Refresh the drift baseline to the anchor we just pushed (only while running — paused = no anchor).
 		if (epoch != null) await env.MATCH_STATE.put(epochKey, String(epoch), { expirationTtl: MATCH_STATE_TTL });
+		await env.MATCH_STATE.put(stopKey, stoppage, { expirationTtl: MATCH_STATE_TTL });
 	}
 }
 
