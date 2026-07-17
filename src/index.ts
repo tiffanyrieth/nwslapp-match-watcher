@@ -343,6 +343,10 @@ export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 
+		// Liveness probe: answer any HEAD with an empty 200, so a HEAD-only uptime monitor
+		// (UptimeRobot free tier) reads the Worker as UP instead of 404-ing on the GET routes below.
+		if (request.method === "HEAD") return new Response(null, { status: 200 });
+
 		if (request.method === "GET" && url.pathname === "/") {
 			return new Response(
 				"nwslapp-match-watcher — cron live-event watcher (kickoff/goal/halftime/full-time). POST /test-push (x-trigger-secret) to send a synthetic push. GET /card/* 302-redirects to the nwslapp-card worker.",
