@@ -322,6 +322,19 @@ export default {
 					await sleep(30_000);
 					await runWatch(env, true); // second poll — cache-busted for a fresh ESPN read
 				}
+				// Dead-cron watchdog (2026-07-16): ping healthchecks.io at the END of every tick —
+				// runs even when runWatch failed (the watchdog reports "the cron is ALIVE", not
+				// "the tick succeeded"; tick-level failures already log/diag on their own). If the
+				// pings STOP, healthchecks emails the owner — the one failure class no self-hosted
+				// alert can cover (a dead worker can't email anyone). Unset secret → no-op.
+				const hc = (env as unknown as { HEALTHCHECK_URL?: string }).HEALTHCHECK_URL;
+				if (hc) {
+					try {
+						await fetch(hc);
+					} catch (err) {
+						console.log(`[watcher] heartbeat ping failed: ${err}`);
+					}
+				}
 			})(),
 		);
 	},
