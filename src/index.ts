@@ -46,6 +46,7 @@ import {
 // "Exceeded CPU Time Limits" errors. This worker only builds card URLs (CARD_PUBLIC_URL) and
 // 302-redirects any /card request that lands here (late-delivered pushes carry the old origin).
 import { activityTokensForMatch, allDeviceTokens, allStartTokens, startTokensForCompetition, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activeFeeds, buildIndex, DISCOVERY_INTERVAL_MS, discoveryDue, kickoffMs, liveMissedByIndex, NWSL_FEED, reconcileFeed, type FixtureIndex } from "./fixtures";
 import { buildStartAps, endLiveActivity, liveTopic, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
 import { buildMessages, collapseIdFor, enqueueFanout, type FanoutMessage } from "./fanout";
@@ -412,16 +413,17 @@ export default {
 // A match is "in the live window" if it kicked off within the last 4h (covers
 // in-progress + just-finished) and not more than 5min in the future. This bounds
 // the per-match KV reads to today's handful of games instead of the whole season.
+// (`kickoffMs` moved to fixtures.ts — the fixture index shares the same parser.)
 const WINDOW_PAST_MS = 4 * 60 * 60 * 1000;
 const WINDOW_FUTURE_MS = 5 * 60 * 1000;
 
-/** Kickoff time in ms, tolerating ESPN's seconds-less timestamps ("…T17:00Z"). */
-function kickoffMs(event: ScoreboardEvent): number | null {
-	if (!event.date) return null;
-	const normalized = /T\d{2}:\d{2}Z$/.test(event.date) ? event.date.replace("Z", ":00Z") : event.date;
-	const ms = Date.parse(normalized);
-	return Number.isFinite(ms) ? ms : null;
-}
+// The fixture index (fixture-window polling — see src/fixtures.ts for the doctrine): one KV key,
+// rebuilt by the ~6h discovery sweep, read every tick to decide WHICH feeds to poll at all.
+// TTL is a garbage guard only — discovery refreshes it 4×/day; if KV ever loses it,
+// discoveryDue(null) self-heals with an immediate sweep.
+const FIXTURE_INDEX_KEY = "fixture-index";
+const FIXTURE_INDEX_TTL_S = 48 * 3600;
+const DISCOVERY_HOURS = DISCOVERY_INTERVAL_MS / 3_600_000;
 
 /**
  * Re-read ONE match from a FRESH scoreboard (the debounce re-poll). The `_cb` param changes the proxy
@@ -458,24 +460,78 @@ async function refetchMatch(env: Env, eventId: string): Promise<Match | null> {
 async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	const now = Date.now();
 	const cb = cacheBust ? `&_cb=${Date.now()}` : "";
-	let events: ScoreboardEvent[];
-	try {
-		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500${cb}`, {
-			headers: { Accept: "application/json" },
-		});
-		if (!res.ok) {
-			console.log(`[watcher] scoreboard fetch failed: ${res.status}`);
-			return false;
+
+	/** Fetch one feed's scoreboard window through the proxy binding (null on failure). */
+	const fetchFeed = async (feed: string): Promise<ScoreboardEvent[] | null> => {
+		const league = feed === NWSL_FEED ? "" : `league=${feed}&`;
+		try {
+			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?${league}dates=${scoreboardWindow()}&limit=500${cb}`, {
+				headers: { Accept: "application/json" },
+			});
+			if (!res.ok) {
+				console.log(`[watcher] scoreboard fetch failed (${feed}): ${res.status}`);
+				return null;
+			}
+			return ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
+		} catch (err) {
+			console.log(`[watcher] scoreboard fetch threw (${feed}): ${err}`);
+			return null;
 		}
-		events = ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
-	} catch (err) {
-		console.log(`[watcher] scoreboard fetch threw: ${err}`);
-		return false;
+	};
+
+	// FIXTURE-WINDOW POLLING (src/fixtures.ts): decide WHICH feeds to fetch at all this tick.
+	//  - Discovery due (~6h, or index missing) → sweep ALL 16 feeds once + rebuild the index.
+	//    The rebuild is accepted ONLY on a complete sweep — a partial sweep (proxy blip) keeps
+	//    the previous index (or stays null) so discovery retries NEXT TICK instead of a bad
+	//    index silencing polling for 6h.
+	//  - Otherwise → fetch only feeds with a fixture inside [KO−75m … KO+4h] (minus ended).
+	//    No active fixtures ⇒ this tick makes ZERO proxy fetches (was: 16 every minute, 24/7).
+	let index = await env.MATCH_STATE.get<FixtureIndex>(FIXTURE_INDEX_KEY, "json");
+	const feedEvents = new Map<string, ScoreboardEvent[]>();
+	let indexDirty = false;
+	if (discoveryDue(index, now)) {
+		const allFeeds = [NWSL_FEED, ...NT_LEAGUES];
+		for (const feed of allFeeds) {
+			const evs = await fetchFeed(feed);
+			if (evs) feedEvents.set(feed, evs);
+		}
+		if (feedEvents.size === allFeeds.length) {
+			// DIAG (NO SILENT FAILURES): a live match the old index never listed = a fixture that
+			// appeared inside the discovery gap and MISSED its alert window. Expected never; loud if ever.
+			for (const miss of liveMissedByIndex(index, feedEvents)) {
+				console.log(`[watcher] DIAG missed-window LIVE match at discovery: ${miss.feed}/${miss.id} — announced <${DISCOVERY_HOURS}h pre-kickoff?`);
+			}
+			index = buildIndex(feedEvents, now);
+			indexDirty = true;
+			console.log(`[watcher] discovery: rebuilt fixture index — ${index.fixtures.length} fixture(s) across ${feedEvents.size} feeds`);
+		} else {
+			console.log(`[watcher] discovery INCOMPLETE (${feedEvents.size}/${allFeeds.length} feeds) — keeping previous index, retrying next tick`);
+			// Still fold what we DID fetch into the existing index so this tick's data isn't wasted.
+			if (index) {
+				for (const [feed, evs] of feedEvents) {
+					if (reconcileFeed(index, feed, evs)) indexDirty = true;
+				}
+			}
+		}
+	} else if (index) {
+		for (const feed of activeFeeds(index, now)) {
+			const evs = await fetchFeed(feed);
+			if (evs) {
+				feedEvents.set(feed, evs);
+				// Mark newly-finished fixtures ended (feed goes quiet at real FT, not the 4h backstop)
+				// + absorb same-day additions/reschedules ESPN applied while the feed was active.
+				if (reconcileFeed(index, feed, evs)) indexDirty = true;
+			}
+		}
 	}
+
+	let events: ScoreboardEvent[] = feedEvents.get(NWSL_FEED) ?? [];
 
 	// DEBUG HARNESS: inject the KV-flagged synthetic fixture into the FULL event list, so the cron's real
 	// club detect loop (kickoff/goal/FT + V2 broadcast), LA-start pass, and lineup pass all process it —
 	// exercising the whole organic V2 lifecycle. No-op unless POST /debug/fake-match set the flag.
+	// Deliberately OUTSIDE the fixture-window gate: the harness works even on a quiet day with zero
+	// real fixtures (its KV read is the only per-tick cost besides the index read).
 	const fakeEvent = await readFakeMatch(env);
 	if (fakeEvent) events = [...events, fakeEvent];
 
@@ -574,20 +630,13 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 
 	// NATIONAL-TEAM pass: the same event detection (kickoff/goal/HT/FT), but fanned out by FIFA code to
 	// `competition_alert_preferences` instead of the club table. V1 push only — NT Live Activities (V2)
-	// and the VAR-correction debounce are deferred (kept the club-only path). Feeds share the proxy edge
-	// cache; the live-window gate means an off-tournament feed does zero KV work. Reuses `jwt`/`sb`/`apns`.
+	// and the VAR-correction debounce are deferred (kept the club-only path). Reuses `jwt`/`sb`/`apns`.
+	// FIXTURE-WINDOW: a feed appears in `feedEvents` only when it was actually polled this tick
+	// (a fixture in window, or the discovery sweep) — an off-tournament feed costs ZERO fetches now,
+	// not just zero KV work.
 	for (const slug of NT_LEAGUES) {
-		let ntEvents: ScoreboardEvent[];
-		try {
-			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?league=${slug}&dates=${scoreboardWindow()}&limit=500${cb}`, {
-				headers: { Accept: "application/json" },
-			});
-			if (!res.ok) continue;
-			ntEvents = ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
-		} catch (err) {
-			console.log(`[watcher] NT scoreboard ${slug} failed: ${err}`);
-			continue;
-		}
+		const ntEvents = feedEvents.get(slug);
+		if (!ntEvents) continue;
 		for (const event of ntEvents) {
 			const ko = kickoffMs(event);
 			if (ko === null) continue;
@@ -664,6 +713,12 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 		await sweepOrphanChannels(env, apns);
 	} catch (err) {
 		console.log(`[watcher] channel sweep failed: ${err}`);
+	}
+
+	// Persist the fixture index only when something changed (a discovery rebuild, a fixture ending,
+	// a same-day addition/reschedule) — a quiet tick writes nothing.
+	if (indexDirty && index) {
+		await env.MATCH_STATE.put(FIXTURE_INDEX_KEY, JSON.stringify(index), { expirationTtl: FIXTURE_INDEX_TTL_S });
 	}
 
 	return liveInWindow;
