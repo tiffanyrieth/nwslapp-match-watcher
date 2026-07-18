@@ -615,6 +615,18 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 				await fireV1(correctionEvent(candidate.prev, recheck!));
 				correctionFired = true;
 				console.log(`[watcher] correction ${match.eventId} CONFIRMED → ${recheck!.home.score}-${recheck!.away.score}`);
+			} else if (!recheck) {
+				// Re-poll FAILED (the same proxy/ESPN flakiness that produced the dip). We can neither
+				// confirm nor deny the decrease, so DON'T baseline the glitched-LOW score — persisting it
+				// would make ESPN's recovery next tick look like a fresh GOAL and fire a false push to every
+				// follower. Hold the PRIOR scores this tick (keeping match's other fields: clock/status);
+				// the next tick re-evaluates, since the debounce acts only on a PERSISTING dip.
+				effectiveMatch = {
+					...match,
+					home: { ...match.home, score: candidate.prev.home },
+					away: { ...match.away, score: candidate.prev.away },
+				};
+				console.log(`[watcher] correction ${match.eventId} re-poll FAILED — holding prior ${candidate.prev.home}-${candidate.prev.away} baseline (no false goal)`);
 			} else {
 				console.log(`[watcher] correction ${match.eventId} discarded — decrease did not persist (glitch)`);
 			}
