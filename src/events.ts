@@ -504,8 +504,11 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 		}
 	}
 
-	// Halftime — fired once while STATUS_HALFTIME holds.
-	if (match.state === "in" && match.statusName === "STATUS_HALFTIME" && !prev?.halftimeSent) {
+	// Halftime — fired once while a HALFTIME status holds. Match the WIDGET's matcher
+	// (`clockRunning`: `statusName.toUpperCase().includes("HALFTIME")`) rather than an exact
+	// `=== "STATUS_HALFTIME"`, so an ESPN status-string variant can't render a static HT card
+	// on the Live Activity while silently never firing the V1 halftime push (display/alert must stay aligned).
+	if (match.state === "in" && match.statusName.toUpperCase().includes("HALFTIME") && !prev?.halftimeSent) {
 		const scorers = lastScorerLine(match);
 		events.push({ ...base, type: "halftime", prefColumn: "halftime", title: "Halftime", subtitle: scorers ? `${scoreline(match)} · ${scorers}` : scoreline(match) });
 	}

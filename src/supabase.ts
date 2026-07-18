@@ -102,14 +102,49 @@ export async function tokensForEvent(
 	teamIds: string[],
 	prefColumn: PrefColumn,
 ): Promise<string[]> {
-	if (teamIds.length === 0) return [];
+	return (await resolveTokensForEvent(cfg, teamIds, prefColumn)).tokens;
+}
+
+/** The gate-by-gate result of the per-event fan-out lookup: the final `tokens`, plus the intermediate
+ *  opt-in counts. The counts exist ONLY for diagnostics (NO SILENT FAILURES): when `tokens` is empty,
+ *  they say WHY — `teamOptIns === 0` is the benign "nobody follows either team", whereas
+ *  `teamOptIns > 0 && tokens.length === 0` is the SUSPICIOUS zero (followers exist but the pref/token
+ *  gate emptied them — a pref toggled off, a missing device token, or a transient read). */
+export interface FanoutResolution {
+	tokens: string[];
+	/** Users with alerts ON for either team (team_alert_preferences gate). */
+	teamOptIns: number;
+	/** …of those, users with THIS event type's pref column ON (notification_preferences gate). */
+	prefEligible: number;
+}
+
+export async function resolveTokensForEvent(
+	cfg: SupabaseConfig,
+	teamIds: string[],
+	prefColumn: PrefColumn,
+): Promise<FanoutResolution> {
+	if (teamIds.length === 0) return { tokens: [], teamOptIns: 0, prefEligible: 0 };
 	if (!PREF_COLUMNS.includes(prefColumn)) throw new Error(`Unknown pref column: ${prefColumn}`);
 
 	const alertRows = await rest<{ user_id: string }>(
 		cfg,
 		`team_alert_preferences?team_id=in.${inList(teamIds)}&alerts_enabled=eq.true&select=user_id`,
 	);
-	return tokensForUsers(cfg, uniq(alertRows.map((r) => r.user_id)), prefColumn);
+	const optedInIds = uniq(alertRows.map((r) => r.user_id));
+	if (optedInIds.length === 0) return { tokens: [], teamOptIns: 0, prefEligible: 0 };
+
+	const prefRows = await rest<{ user_id: string }>(
+		cfg,
+		`notification_preferences?user_id=in.${inList(optedInIds)}&${prefColumn}=eq.true&select=user_id`,
+	);
+	const eligibleIds = uniq(prefRows.map((r) => r.user_id));
+	if (eligibleIds.length === 0) return { tokens: [], teamOptIns: optedInIds.length, prefEligible: 0 };
+
+	const tokenRows = await rest<{ token: string }>(
+		cfg,
+		`device_tokens?user_id=in.${inList(eligibleIds)}&select=token`,
+	);
+	return { tokens: uniq(tokenRows.map((r) => r.token)), teamOptIns: optedInIds.length, prefEligible: eligibleIds.length };
 }
 
 /** The NATIONAL-TEAM twin of tokensForEvent: same two gates, but the per-team opt-in comes from
