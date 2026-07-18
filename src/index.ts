@@ -45,7 +45,7 @@ import {
 // so its cold-start module-eval never touches this cron's per-tick CPU budget — the fix for the
 // "Exceeded CPU Time Limits" errors. This worker only builds card URLs (CARD_PUBLIC_URL) and
 // 302-redirects any /card request that lands here (late-delivered pushes carry the old origin).
-import { activityTokensForMatch, allDeviceTokens, allStartTokens, startTokensForCompetition, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activityTokensForMatch, allDeviceTokens, allStartTokens, resolveTokensForEvent, startTokensForCompetition, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { activeFeeds, buildIndex, DISCOVERY_INTERVAL_MS, discoveryDue, kickoffMs, liveMissedByIndex, NWSL_FEED, reconcileFeed, type FixtureIndex } from "./fixtures";
 import { buildStartAps, endLiveActivity, liveTopic, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
@@ -1031,22 +1031,36 @@ async function checkUpcomingLineups(
 		if (ko === null || ko < now || ko - now > LINEUP_LEAD_MS) continue;
 		const info = upcomingInfo(event);
 		if (!info) continue;
-		const key = `lineup:${info.matchId}`;
-		if (await env.MATCH_STATE.get(key)) continue; // already fired
+		const sentKey = `lineup:${info.matchId}`;
+		if (await env.MATCH_STATE.get(sentKey)) continue; // already SENT to ≥1 recipient — one-shot, done
 
-		// Cache-busted so we see ESPN's live state, not a cached pre-lineup shell.
-		let summary: unknown;
-		try {
-			const res = await env.PROXY.fetch(`${PROXY_SUMMARY}?event=${info.matchId}&_lc=${now}`, {
-				headers: { Accept: "application/json" },
-			});
-			if (!res.ok) continue;
-			summary = await res.json();
-		} catch (err) {
-			console.log(`[watcher] lineup summary fetch failed (${info.matchId}): ${err}`);
-			continue;
+		// TWO markers, two concerns (was one, which conflated them): `lineup-pub` = "both XIs are posted"
+		// (stops the /summary re-poll once we know it's published); `lineup` (sentKey) = "we actually sent
+		// to ≥1 recipient" (the one-shot dedup). Splitting them lets us KEEP retrying the follower lookup
+		// after publish — so a 0-recipient tick (a transient Supabase read, or a follower who enabled the
+		// alert a beat late) SELF-HEALS next tick instead of being permanently dropped. This mirrors the
+		// V2 LA-start's retry-until-sent semantics (startUpcomingActivities); the old mark-fired-even-at-0
+		// gave up after ONE empty read, which silently dropped the alert (device-diagnosed 2026-07-18).
+		const pubKey = `lineup-pub:${info.matchId}`;
+		let published = (await env.MATCH_STATE.get(pubKey)) !== null;
+		if (!published) {
+			// Cache-busted so we see ESPN's live state, not a cached pre-lineup shell.
+			let summary: unknown;
+			try {
+				const res = await env.PROXY.fetch(`${PROXY_SUMMARY}?event=${info.matchId}&_lc=${now}`, {
+					headers: { Accept: "application/json" },
+				});
+				if (!res.ok) continue;
+				summary = await res.json();
+			} catch (err) {
+				console.log(`[watcher] lineup summary fetch failed (${info.matchId}): ${err}`);
+				continue;
+			}
+			if (!lineupsPublished(summary as Parameters<typeof lineupsPublished>[0])) continue; // not posted yet — retry next tick
+			published = true;
+			// Remember publish so later ticks skip the /summary fetch entirely (no new polling load).
+			await env.MATCH_STATE.put(pubKey, String(now), { expirationTtl: MATCH_STATE_TTL });
 		}
-		if (!lineupsPublished(summary as Parameters<typeof lineupsPublished>[0])) continue; // not posted yet — retry next tick
 
 		const lineupEvent: MatchEvent = {
 			type: "lineup",
@@ -1061,21 +1075,29 @@ async function checkUpcomingLineups(
 			awayScore: 0,
 		};
 
-		let tokens: string[];
+		let recipients;
 		try {
-			tokens = await tokensForEvent(sb, [info.homeId, info.awayId], "lineup_posted");
+			recipients = await resolveTokensForEvent(sb, [info.homeId, info.awayId], "lineup_posted");
 		} catch (err) {
 			console.log(`[watcher] lineup follower lookup failed (${info.matchId}): ${err}`);
 			continue; // don't mark KV — retry next tick so a transient lookup failure doesn't drop the alert
 		}
-		if (tokens.length > 0) {
-			await enqueueV1(env, lineupEvent, tokens);
+		if (recipients.tokens.length > 0) {
+			await enqueueV1(env, lineupEvent, recipients.tokens);
+			// SENT ⇒ mark the one-shot dedup so we don't re-alert anyone this match.
+			await env.MATCH_STATE.put(sentKey, String(now), { expirationTtl: MATCH_STATE_TTL });
 		} else {
-			console.log(`[watcher] lineup ${info.homeAbbr} vs ${info.awayAbbr}: published, 0 opt-ins`);
+			// NO SILENT FAILURES: a 0-recipient publish is only benign when NOBODY follows either team.
+			// teamOptIns > 0 with 0 tokens is SUSPICIOUS (a pref off for all, a missing device token, or a
+			// transient read) — log the gate breakdown so it's diagnosable, and DON'T mark sentKey: retry
+			// next tick (bounded by the pre-kickoff window guard above) so the alert can still land.
+			const suspicious = recipients.teamOptIns > 0;
+			console.log(
+				`[watcher] lineup ${info.homeAbbr} vs ${info.awayAbbr}: published, 0 recipients ` +
+					`(teamOptIns=${recipients.teamOptIns}, prefEligible=${recipients.prefEligible})` +
+					`${suspicious ? " — SUSPICIOUS (followers exist), retrying within window" : " — no followers, retrying"}`,
+			);
 		}
-		// Published ⇒ mark fired (the "lineups are in" moment is one-shot), even at 0 opt-ins, so we stop
-		// re-polling /summary every minute for the rest of the window.
-		await env.MATCH_STATE.put(key, String(now), { expirationTtl: MATCH_STATE_TTL });
 	}
 }
 
