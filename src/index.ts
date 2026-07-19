@@ -758,6 +758,12 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
  *  local clock needs to tick. Broadcast replaces the old per-Activity-token loop: no per-token fan-out and
  *  no catch-up pass (the start payload carried current state, and the No-Storage policy means a late
  *  subscriber just waits for the next broadcast). Resync throttled by LA_RESYNC_MS. */
+// Per-match widget-clock bookkeeping, MERGED into one KV key (was three: la-rs / la-epoch / la-stop) so a
+// resync costs 1 KV write, not 3 — the dominant write path on a busy match day (docs/notifications.md).
+// `rs` = last resync time (the 10-min floor); `epoch` = last-broadcast anchor (null while paused, but the
+// last non-null value is retained so drift detection survives HT); `stop` = last stoppage label.
+interface AnchorState { rs: number; epoch: number | null; stop: string }
+
 async function syncLiveActivity(
 	env: Env,
 	apns: ApnsConfig,
@@ -768,9 +774,7 @@ async function syncLiveActivity(
 	const chanId = await env.MATCH_STATE.get(channelKey(match.eventId));
 	if (!chanId) return; // no channel ⇒ no Activities were started for this match (or create failed)
 	const ended = match.state === "post";
-	const rsKey = `la-rs:${match.eventId}`;
-	const epochKey = `la-epoch:${match.eventId}`; // last-broadcast anchor, for drift-triggered resync
-	const stopKey = `la-stop:${match.eventId}`; // last-broadcast stoppage label, for the per-minute +N push
+	const anchorKey = `la-anchor:${match.eventId}`; // merged {rs, epoch, stop} — 1 KV write/resync, not 3
 	const state: LiveContentState = contentStateFromMatch(match, virtualKickoff);
 	const jwt = await apnsJwt(apns);
 
@@ -781,9 +785,7 @@ async function syncLiveActivity(
 		console.log(`[watcher] LA broadcast END ${match.eventId}: ${r.ok ? "ok" : `${r.status} ${r.reason ?? ""}`}`);
 		await deleteChannel(apns, jwt, chanId);
 		await env.MATCH_STATE.delete(channelKey(match.eventId));
-		await env.MATCH_STATE.delete(rsKey);
-		await env.MATCH_STATE.delete(epochKey);
-		await env.MATCH_STATE.delete(stopKey);
+		await env.MATCH_STATE.delete(anchorKey);
 		return;
 	}
 
@@ -791,34 +793,29 @@ async function syncLiveActivity(
 	// between those the widget's local timer ticks on its own (no push). ONE broadcast reaches every
 	// subscriber regardless of how many.
 	const epoch = state.clockStartEpoch; // the exact anchor the widget renders; undefined while paused
+	const prev = await env.MATCH_STATE.get<AnchorState>(anchorKey, "json"); // last broadcast — read ONCE
 	let resync = hadEvent;
 	// Drift-triggered resync: the anchor is stable during smooth play (the on-device timer tracks ESPN
 	// 1:1), but jumps ≥30s at each half's late live-flip / a mid-game correction — resync then so the
 	// card snaps within one tick instead of coasting behind for up to the 10-min floor.
-	if (!resync && epoch != null) {
-		const lastEpoch = await env.MATCH_STATE.get(epochKey);
-		if (lastEpoch != null && Math.abs(epoch - Number(lastEpoch)) >= LA_DRIFT_RESYNC_SEC) resync = true;
+	if (!resync && epoch != null && prev?.epoch != null && Math.abs(epoch - prev.epoch) >= LA_DRIFT_RESYNC_SEC) {
+		resync = true;
 	}
 	// Stoppage rollover: in added time the anchor is FROZEN (no drift), but stoppageDisplay ticks
 	// "90'+1'"→"+2'"… each minute — the only way the widget's static +N advances is a fresh broadcast,
 	// so resync whenever the label changes (entering, each minute, and leaving stoppage). Bounded: a
 	// handful of pushes per stoppage window, one broadcast reaching all subscribers.
 	const stoppage = state.stoppageDisplay ?? "";
-	if (!resync) {
-		const lastStop = (await env.MATCH_STATE.get(stopKey)) ?? "";
-		if (lastStop !== stoppage) resync = true;
-	}
-	if (!resync) {
-		const last = await env.MATCH_STATE.get(rsKey);
-		resync = !last || Date.now() - Number(last) >= LA_RESYNC_MS;
-	}
+	if (!resync && (prev?.stop ?? "") !== stoppage) resync = true;
+	// 10-min floor: re-broadcast even during smooth play so the widget can't coast too far behind.
+	if (!resync) resync = prev?.rs == null || Date.now() - prev.rs >= LA_RESYNC_MS;
 	if (resync) {
 		const r = await broadcastUpdate(apns, jwt, chanId, state);
 		console.log(`[watcher] LA broadcast update ${match.eventId}: ${r.ok ? "ok" : `${r.status} ${r.reason ?? ""}`}`);
-		await env.MATCH_STATE.put(rsKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
-		// Refresh the drift baseline to the anchor we just pushed (only while running — paused = no anchor).
-		if (epoch != null) await env.MATCH_STATE.put(epochKey, String(epoch), { expirationTtl: MATCH_STATE_TTL });
-		await env.MATCH_STATE.put(stopKey, stoppage, { expirationTtl: MATCH_STATE_TTL });
+		// ONE write for all three fields. Keep the last non-null epoch while paused (HT) so the drift
+		// baseline survives the break — matches the old "only write epoch when running" behavior.
+		const next: AnchorState = { rs: Date.now(), epoch: epoch ?? prev?.epoch ?? null, stop: stoppage };
+		await env.MATCH_STATE.put(anchorKey, JSON.stringify(next), { expirationTtl: MATCH_STATE_TTL });
 	}
 }
 
