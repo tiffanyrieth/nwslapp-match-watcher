@@ -95,7 +95,7 @@ test("correctionEvent: subject-first title, corrected scoreline subtitle, prev s
 	const ev = correctionEvent({ home: 2, away: 1 }, withScores(1, 1));
 	assert.equal(ev.type, "correction");
 	assert.equal(ev.prefColumn, "goals");
-	assert.equal(ev.title, "NO GOAL — Washington Spirit"); // v3 copy: subject-first, matches the attached crest
+	assert.equal(ev.title, "NO GOAL: Washington Spirit"); // v4: subject-first colon, matches the attached crest
 	assert.equal(ev.subtitle, "WAS 1–1 SEA · VAR review"); // abbreviations + en-dash, the app-wide rule
 	assert.equal(ev.homeScore, 1);
 	assert.equal(ev.awayScore, 1);

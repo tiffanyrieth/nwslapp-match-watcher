@@ -110,7 +110,7 @@ describe("detectEvents - kickoff", () => {
 		const events = detectEvents(null, match({ period: 1, clock: 30 }));
 		expect(types(events)).toEqual(["kickoff"]);
 		expect(events[0].prefColumn).toBe("kickoff");
-		expect(events[0].title).toBe("Kickoff — WAS vs ORL");
+		expect(events[0].title).toBe("Kickoff: WAS vs ORL");
 	});
 
 	it("subtitle shows venue + broadcast (how to watch)", () => {
@@ -137,21 +137,21 @@ describe("detectEvents - goals", () => {
 	it("detects the home team scoring, carrying both team ids", () => {
 		const events = detectEvents(stored(withScores(0, 0)), withScores(1, 0));
 		expect(types(events)).toEqual(["goal"]);
-		expect(events[0].title).toBe("GOAL — Washington Spirit"); // subject-first: title = the scoring club
+		expect(events[0].title).toBe("GOAL: Washington Spirit"); // subject-first: title = the scoring club
 		expect(events[0].subtitle).toBe("WAS 1–0 ORL"); // unattributed → scoreline only, no fabrication
 		expect(events[0].teamIds).toEqual(["15365", "20905"]);
 	});
 
 	it("detects the away team scoring", () => {
 		const events = detectEvents(stored(withScores(1, 0)), withScores(1, 1));
-		expect(events[0].title).toBe("GOAL — Orlando Pride");
+		expect(events[0].title).toBe("GOAL: Orlando Pride");
 		expect(events[0].scoringSide).toBe("away");
 	});
 
 	it("collapses a multi-goal jump into one goal with the current scoreline", () => {
 		const events = detectEvents(stored(withScores(0, 0)), withScores(2, 0));
 		expect(types(events)).toEqual(["goal"]);
-		expect(events[0].title).toBe("GOAL — Washington Spirit");
+		expect(events[0].title).toBe("GOAL: Washington Spirit");
 	});
 
 	it("two goals when both teams score in one tick", () => {
@@ -183,14 +183,14 @@ describe("detectEvents - full time", () => {
 		const events = detectEvents(prev, ended);
 		expect(types(events)).toEqual(["fulltime"]);
 		expect(events[0].title).toBe("Full time");
-		expect(events[0].subtitle).toBe("WAS 2–1 ORL · Washington Spirit win");
+		expect(events[0].subtitle).toBe("WAS 2–1 ORL"); // v4: scoreline only (no "…win" tail)
 		expect(events[0].scoringSide).toBe("home"); // winner — picks the attached crest
 	});
 
 	it("reports a draw", () => {
 		const prev = stored(withScores(1, 1));
 		const ended = withScores(1, 1, { state: "post" });
-		expect(detectEvents(prev, ended)[0].subtitle).toBe("WAS 1–1 ORL · It's a draw");
+		expect(detectEvents(prev, ended)[0].subtitle).toBe("WAS 1–1 ORL"); // v4: scoreline only (no "draw" tail)
 	});
 
 	it("fires a final-tick goal AND full time together", () => {
@@ -255,13 +255,13 @@ describe("parseMatch - scoring plays", () => {
 });
 
 describe("detectEvents - scorer attribution", () => {
-	it("puts the score in the title, scorer + minute in the subtitle (no body)", () => {
+	it("names the club in the title, scorer FIRST then score in the subtitle (no body)", () => {
 		const scored = withScores(1, 0, {
 			plays: [{ teamId: "15365", scorer: "S. Smith", minute: 67 }],
 		});
 		const [goal] = detectEvents(stored(withScores(0, 0)), scored);
-		expect(goal.title).toBe("GOAL — Washington Spirit");
-		expect(goal.subtitle).toBe("WAS 1–0 ORL · S. Smith 67'");
+		expect(goal.title).toBe("GOAL: Washington Spirit");
+		expect(goal.subtitle).toBe("S. Smith 67' · WAS 1–0 ORL"); // v4: scorer-first
 		expect(goal.body).toBeUndefined();
 		expect(goal.scorer).toBe("S. Smith");
 		expect(goal.minute).toBe(67);
@@ -305,7 +305,7 @@ describe("toPayload", () => {
 			event: string;
 			imageUrl: string;
 		};
-		expect(payload.aps.alert.title).toBe("GOAL — Washington Spirit");
+		expect(payload.aps.alert.title).toBe("GOAL: Washington Spirit");
 		expect(payload.aps.alert.subtitle).toBe("WAS 1–0 ORL");
 		expect(payload.aps.alert.body).toBeUndefined(); // two-line contract — no body
 		expect(payload.aps["mutable-content"]).toBe(1);
