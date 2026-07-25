@@ -97,8 +97,8 @@ test("redcard fires once when a side's count rises, rides the goals pref, crests
 	const red = events.find((e) => e.type === "redcard");
 	assert.ok(red, "redcard event must fire");
 	assert.equal(red!.prefColumn, "goals");
-	assert.equal(red!.title, "Red card — Seattle Reign FC");
-	assert.equal(red!.subtitle, "WAS 0–0 SEA · S. Menti 55'");
+	assert.equal(red!.title, "Red card: Seattle Reign FC");
+	assert.equal(red!.subtitle, "55' S. Menti"); // v4: minute-first player, NO scoreline
 	assert.equal(red!.scoringSide, "away"); // carded club's crest attaches
 });
 
@@ -116,7 +116,7 @@ test("second red for the same side fires again", () => {
 	const events = detectEvents(storedFor(m, { redCards: { home: 0, away: 1 } }), m);
 	const red = events.find((e) => e.type === "redcard");
 	assert.ok(red);
-	assert.equal(red!.subtitle, "WAS 0–0 SEA · C. Dickey 80'"); // newest red attributed
+	assert.equal(red!.subtitle, "80' C. Dickey"); // v4: minute-first, newest red attributed
 });
 
 test("MIGRATION GUARD: a pre-existing KV row without redCards only baselines — no late fire", () => {

@@ -1076,7 +1076,7 @@ async function checkUpcomingLineups(
 			eventId: info.matchId,
 			teamIds: [info.homeId, info.awayId],
 			prefColumn: "lineup_posted",
-			title: `Lineups in — ${info.homeAbbr} vs ${info.awayAbbr}`,
+			title: `Lineups in: ${info.homeAbbr} vs ${info.awayAbbr}`,
 			subtitle: "Starting XIs are posted",
 			homeAbbr: info.homeAbbr,
 			awayAbbr: info.awayAbbr,
