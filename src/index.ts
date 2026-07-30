@@ -773,6 +773,18 @@ async function syncLiveActivity(
 ): Promise<void> {
 	const chanId = await env.MATCH_STATE.get(channelKey(match.eventId));
 	if (!chanId) return; // no channel ⇒ no Activities were started for this match (or create failed)
+
+	// ⚠️ A SUSPENDED match reports `state === "post"` while play is halted (2026-07-29, UTA v WAS).
+	// Skip entirely: no update, no teardown. The teardown below is IRREVERSIBLE — it deletes the
+	// channel at APNs and both KV keys, and push-to-start is gated on `ko >= now`, so an already-
+	// kicked-off match can NEVER restart its Activity. Freezing the card on its last state until play
+	// resumes is the only recoverable option. (Broadcasting an update instead would be wrong too: the
+	// content state derives its phase from `state`, so it would render a full-time card mid-match.)
+	if (match.unfinishedPost) {
+		console.log(`[watcher] LA hold ${match.eventId}: ${match.statusName} — not ended, skipping`);
+		return;
+	}
+
 	const ended = match.state === "post";
 	const anchorKey = `la-anchor:${match.eventId}`; // merged {rs, epoch, stop} — 1 KV write/resync, not 3
 	const state: LiveContentState = contentStateFromMatch(match, virtualKickoff);

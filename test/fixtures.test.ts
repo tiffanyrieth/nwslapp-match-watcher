@@ -176,3 +176,76 @@ test("liveMissedByIndex is silent on the first-ever build (nothing to have misse
 	const feeds = new Map<string, ScoreboardEvent[]>([[NWSL_FEED, [event("x", NOW, "in")]]]);
 	assert.deepEqual(liveMissedByIndex(null, feeds), []);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⛈️ SUSPENDED ≠ ENDED (regression, 2026-07-29 — UTA v WAS, wind hold at 27')
+//
+// ESPN reports a suspended match as `state: "post"` with `completed: false` and
+// `name: "STATUS_SUSPENDED"`. Marking that fixture `ended` drops it from `activeFeeds`, which STOPS
+// POLLING it — and that is exactly what cost a real full-time push. The Spirit match was flagged at
+// the hold, survived only because another live match kept the same feed being fetched, and went
+// unobserved the moment THAT match finished. `match:401853954` was left reading `state:"in"` in KV
+// and no full-time push was ever sent.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A `post` event with ESPN's suspension markers. */
+const suspended = (id: string, koMs: number): ScoreboardEvent => ({
+	id,
+	date: new Date(koMs).toISOString(),
+	status: { type: { state: "post", name: "STATUS_SUSPENDED", completed: false }, period: 1, clock: 1620 },
+	competitions: [{
+		status: { type: { state: "post", name: "STATUS_SUSPENDED", completed: false }, period: 1, clock: 1620 },
+		competitors: [],
+	}],
+});
+
+/** A genuinely finished event. */
+const finished = (id: string, koMs: number): ScoreboardEvent => ({
+	id,
+	date: new Date(koMs).toISOString(),
+	status: { type: { state: "post", name: "STATUS_FULL_TIME", completed: true }, period: 2, clock: 5400 },
+	competitions: [{
+		status: { type: { state: "post", name: "STATUS_FULL_TIME", completed: true }, period: 2, clock: 5400 },
+		competitors: [],
+	}],
+});
+
+test("buildIndex: a SUSPENDED match is not marked ended, so its feed keeps being polled", () => {
+	const now = Date.now();
+	const ko = now - 30 * 60_000; // kicked off half an hour ago
+	const index = buildIndex(new Map([["nwsl", [suspended("s1", ko)]]]), now);
+	assert.equal(index.fixtures[0].ended, undefined, "suspended must NOT be ended");
+	assert.deepEqual(activeFeeds(index, now), new Set(["nwsl"]), "its feed must still be polled");
+});
+
+test("buildIndex: a genuinely finished match IS marked ended", () => {
+	const now = Date.now();
+	const index = buildIndex(new Map([["nwsl", [finished("f1", now - 2 * 3600_000)]]]), now);
+	assert.equal(index.fixtures[0].ended, true);
+	assert.deepEqual(activeFeeds(index, now), new Set(), "a finished fixture closes its window");
+});
+
+test("reconcileFeed: a mid-window suspension must not end the fixture", () => {
+	const now = Date.now();
+	const ko = now - 30 * 60_000;
+	const index = buildIndex(new Map([["nwsl", [event("s1", ko, "in")]]]), now);
+	reconcileFeed(index, "nwsl", [suspended("s1", ko)]);
+	assert.equal(index.fixtures[0].ended, undefined, "the wind hold must not close the window");
+	assert.deepEqual(activeFeeds(index, now), new Set(["nwsl"]), "still polled, so the REAL full time is seen");
+});
+
+test("reconcileFeed: real full time still closes the window", () => {
+	const now = Date.now();
+	const ko = now - 2 * 3600_000;
+	const index = buildIndex(new Map([["nwsl", [event("f1", ko, "in")]]]), now);
+	reconcileFeed(index, "nwsl", [finished("f1", ko)]);
+	assert.equal(index.fixtures[0].ended, true);
+});
+
+test("FAIL-OPEN: a post event with no `completed` and no known status name still ends", () => {
+	// ⚠️ POLARITY. Only POSITIVE evidence of non-completion may hold a fixture open. If ESPN ever drops
+	// the flag, fixtures must still close as they always did — otherwise every feed would poll forever.
+	const now = Date.now();
+	const index = buildIndex(new Map([["nwsl", [event("p1", now - 2 * 3600_000, "post")]]]), now);
+	assert.equal(index.fixtures[0].ended, true);
+});
