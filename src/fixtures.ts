@@ -71,6 +71,35 @@ export function kickoffMs(event: ScoreboardEvent): number | null {
 const eventState = (event: ScoreboardEvent): string | undefined =>
 	event.status?.type?.state ?? event.competitions?.[0]?.status?.type?.state;
 
+/** ⚠️ Has this fixture's window genuinely closed? NOT the same as `state === "post"` — ESPN reports a
+ *  SUSPENDED match as `post`, and marking it `ended` drops it from `isActive`, which STOPS POLLING the
+ *  fixture. On 2026-07-29 that cost a real full-time push: the Spirit match was marked ended at the
+ *  27' wind hold, kept getting diffed only as a side effect of another live match on the same feed,
+ *  and went unobserved the moment that match finished.
+ *
+ *  ⚠️ The status set below MIRRORS `NON_FINAL_POST_STATUSES` in events.ts and must stay in sync. It is
+ *  duplicated deliberately: importing the predicate would make this a VALUE import of "./events", and
+ *  src/ uses extensionless imports that wrangler resolves at build time but `node --test` cannot — so
+ *  it would break `test/fixtures.test.ts` at runtime. Eight lines beats changing the import convention.
+ *
+ *  FAIL-OPEN, same as events.ts: only positive evidence of non-completion counts, so a payload missing
+ *  the flag still closes the window exactly as before. */
+const NON_FINAL_POST_STATUSES = new Set([
+	"STATUS_SUSPENDED",
+	"STATUS_POSTPONED",
+	"STATUS_DELAYED",
+	"STATUS_CANCELED",
+	"STATUS_CANCELLED",
+	"STATUS_ABANDONED",
+]);
+
+const eventEnded = (event: ScoreboardEvent): boolean => {
+	const type = (event.status ?? event.competitions?.[0]?.status)?.type;
+	if (type?.state !== "post") return false;
+	if (type.completed === false) return false;
+	return type.name ? !NON_FINAL_POST_STATUSES.has(type.name) : true;
+};
+
 /** Is a discovery sweep due? (Missing/unreadable index ⇒ yes — the self-heal on deploy/KV loss.) */
 export function discoveryDue(index: FixtureIndex | null, now: number): boolean {
 	if (!index || !Array.isArray(index.fixtures) || !Number.isFinite(index.builtAt)) return true;
@@ -102,7 +131,7 @@ export function buildIndex(feedEvents: ReadonlyMap<string, ScoreboardEvent[]>, n
 			const ko = kickoffMs(event);
 			if (ko === null || !event.id) continue;
 			const fixture: Fixture = { id: event.id, feed, kickoffMs: ko };
-			if (eventState(event) === "post") fixture.ended = true;
+			if (eventEnded(event)) fixture.ended = true;
 			fixtures.push(fixture);
 		}
 	}
@@ -120,7 +149,7 @@ export function reconcileFeed(index: FixtureIndex, feed: string, events: Scorebo
 		const ko = kickoffMs(event);
 		if (ko === null || !event.id) continue;
 		const known = byId.get(event.id);
-		const post = eventState(event) === "post";
+		const post = eventEnded(event);
 		if (!known) {
 			const fixture: Fixture = { id: event.id, feed, kickoffMs: ko };
 			if (post) fixture.ended = true;

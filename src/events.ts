@@ -56,7 +56,9 @@ export interface ScoreboardDetail {
 interface EventStatus {
 	period?: number;
 	clock?: number; // seconds elapsed
-	type?: { state?: string; name?: string }; // state: pre|in|post; name: STATUS_*
+	// `completed` is ESPN's own "did this actually finish" flag and the ONLY reliable way to tell a
+	// FULL-TIME `post` from a SUSPENDED one (device-proven 2026-07-29 — see `isUnfinishedPost`).
+	type?: { state?: string; name?: string; completed?: boolean }; // state: pre|in|post; name: STATUS_*
 }
 
 /** A scoring play reduced to what the card/copy need (best-effort — ESPN may omit). */
@@ -91,6 +93,9 @@ export interface Match {
 	 *  matches FIFA practice: yellows are per-game noise, reds change the match). Same reduced
 	 *  shape as a scoring play: teamId + player + minute. */
 	cards: ScoringPlay[];
+	/** True when `state === "post"` but the match has NOT actually finished (suspended/abandoned).
+	 *  Everything that means "the match is over" must check this — see `isUnfinishedPost`. */
+	unfinishedPost: boolean;
 	/** Venue name ("Audi Field") + broadcast label ("Victory+") — for the kickoff body. Best-effort. */
 	venue?: string;
 	broadcast?: string;
@@ -233,6 +238,32 @@ export function parseCards(details?: ScoreboardDetail[]): ScoringPlay[] {
  * live ("in") or just-ended ("post") and have both team ids (we key followers by
  * team id). "pre" and other states → null (nothing to track yet).
  */
+/** ⚠️ `state === "post"` DOES NOT MEAN THE MATCH FINISHED. ESPN moves a suspended / abandoned /
+ *  postponed match to `post` while setting `completed: false` and `name: "STATUS_SUSPENDED"`.
+ *  Device-proven 2026-07-29 (UTA v WAS, wind hold at 27'): the watcher read bare `post` and
+ *  (a) fired a false FULL TIME, (b) tore down the Live Activity irrecoverably, and (c) marked the
+ *  fixture `ended` — which STOPPED POLLING, so the real full time 3h later was never seen and no
+ *  full-time push was ever sent.
+ *
+ *  FAIL-OPEN by design: only POSITIVE evidence of non-completion counts. A payload with no
+ *  `completed` and no recognised status name still reads as final, exactly as before — a feed that
+ *  quietly drops the flag must not silently stop every match from ever finishing. */
+const NON_FINAL_POST_STATUSES = new Set([
+	"STATUS_SUSPENDED",
+	"STATUS_POSTPONED",
+	"STATUS_DELAYED",
+	"STATUS_CANCELED",
+	"STATUS_CANCELLED",
+	"STATUS_ABANDONED",
+]);
+
+export function isUnfinishedPost(event: ScoreboardEvent): boolean {
+	const type = (event.status ?? event.competitions?.[0]?.status)?.type;
+	if (type?.state !== "post") return false;
+	if (type.completed === false) return true;
+	return type.name ? NON_FINAL_POST_STATUSES.has(type.name) : false;
+}
+
 export function parseMatch(event: ScoreboardEvent): Match | null {
 	const status = event.status ?? event.competitions?.[0]?.status;
 	const state = status?.type?.state;
@@ -255,6 +286,7 @@ export function parseMatch(event: ScoreboardEvent): Match | null {
 	});
 
 	return {
+		unfinishedPost: isUnfinishedPost(event),
 		eventId: event.id,
 		home: side(home),
 		away: side(away),
@@ -503,7 +535,9 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 	}
 
 	// Full time — transition from live to ended. Winner's crest attaches (draw → home).
-	if (prev && prev.state === "in" && match.state === "post") {
+	// ⚠️ `!match.unfinishedPost` — a lightning suspension reports `post` mid-match, and firing here
+	// sent a false FULL TIME at 27' (2026-07-29).
+	if (prev && prev.state === "in" && match.state === "post" && !match.unfinishedPost) {
 		const winnerSide = match.home.score > match.away.score ? "home" : match.away.score > match.home.score ? "away" : undefined;
 		// v4: scoreline ONLY — no "…win" / "It's a draw" tail. (winnerSide still picks the crest.)
 		events.push({ ...base, type: "fulltime", prefColumn: "full_time", title: "Full time", subtitle: scoreline(match), scoringSide: winnerSide });
