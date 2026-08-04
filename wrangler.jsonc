@@ -10,8 +10,11 @@
 	},
 	// Cloudflare's cron floor is 1 minute. Sub-minute polling would need a Durable
 	// Object alarm (scale-only future work).
+	// The per-minute live tick, PLUS the once-daily post-match Predict-results pass (Change 8) at 14:00
+	// UTC (~10am EDT / 9am EST). The `scheduled` handler branches on `event.cron` — this string MUST
+	// match `PREDICT_RESULTS_CRON` in src/index.ts exactly.
 	"triggers": {
-		"crons": ["* * * * *"],
+		"crons": ["* * * * *", "0 14 * * *"],
 	},
 	// Per-match last-known scores (created via `wrangler kv namespace create MATCH_STATE`).
 	"kv_namespaces": [

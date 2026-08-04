@@ -676,3 +676,27 @@ export function toPayload(event: MatchEvent, cardBase: string): Record<string, u
 	if (withCrest) payload.imageUrl = thumbUrl(cardBase, event); // scoring/carded club only; else neutral
 	return payload;
 }
+
+/**
+ * Payload for the post-match "your Predict result is in" push (Change 8). Deliberately NOT `toPayload`:
+ *  - GENERIC copy, NO score in the banner — the push is the hook, the in-app reveal is the payoff.
+ *  - NEUTRAL event: no crest, no `mutable-content` (the NSE stays asleep).
+ *  - ⚠️ The deep-link key is `predictEventID`, NOT `eventID`. The app treats any `eventID` payload as a
+ *    LIVE match (routes to Match Detail + nudges a scoreboard refresh); a Predict push must route to the
+ *    Predict RESULT screen instead, so it carries a separate key the app's tap handler branches on.
+ */
+export function toPredictResultPayload(eventId: string, homeAbbr: string, awayAbbr: string): Record<string, unknown> {
+	return {
+		aps: {
+			alert: {
+				title: `Predict the XI: Your ${homeAbbr} vs ${awayAbbr} result is in`,
+				subtitle: "See how your XI did",
+			},
+			sound: "default",
+			"thread-id": `predict-${eventId}`,
+			"interruption-level": "active",
+		},
+		predictEventID: eventId,
+		event: "predict_result",
+	};
+}

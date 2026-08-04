@@ -34,6 +34,7 @@ import {
 	parseMatch,
 	sameStoredState,
 	toPayload,
+	toPredictResultPayload,
 	type Match,
 	type MatchEvent,
 	type ScoreboardDetail,
@@ -45,7 +46,7 @@ import {
 // so its cold-start module-eval never touches this cron's per-tick CPU budget — the fix for the
 // "Exceeded CPU Time Limits" errors. This worker only builds card URLs (CARD_PUBLIC_URL) and
 // 302-redirects any /card request that lands here (late-delivered pushes carry the old origin).
-import { activityTokensForMatch, allDeviceTokens, allStartTokens, resolveTokensForEvent, startTokensForCompetition, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activityTokensForMatch, allDeviceTokens, allStartTokens, predictResultRecipients, resolveTokensForEvent, startTokensForCompetition, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { activeFeeds, buildIndex, DISCOVERY_INTERVAL_MS, discoveryDue, kickoffMs, liveMissedByIndex, NWSL_FEED, reconcileFeed, type FixtureIndex } from "./fixtures";
 import { buildStartAps, endLiveActivity, liveTopic, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
@@ -160,6 +161,11 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // "Lineups posted" push: start polling /summary this far before kickoff. ESPN posts the XI ~1h out;
 // 75 min gives margin for an early publish. Cron is per-minute → detection fires within ≤60s of the post.
 const LINEUP_LEAD_MS = 75 * 60 * 1000;
+
+// The post-match "your Predict result is in" pass (Change 8) rides its OWN daily cron. 14:00 UTC ≈ 10am
+// EDT / 9am EST — a calm mid-morning window the day after a match, well clear of the FT alert flood.
+// ⚠️ Must match the second entry in wrangler.jsonc `crons` EXACTLY (the scheduled handler branches on it).
+const PREDICT_RESULTS_CRON = "0 14 * * *";
 
 // V2 Live Activity timing.
 const LA_START_LEAD_MS = 20 * 60 * 1000; // remote-start the Activity ≤20 min before kickoff — the token
@@ -314,7 +320,13 @@ export default {
 	// would just re-read the same cached scoreboard). Gated on the live window, so the 23h/day
 	// with no match cost zero extra wall-time / ESPN hits. KV fire-once state chains the two polls
 	// naturally (poll 1 sees 0–0, poll 2 sees 1–0 → fires once, writes state).
-	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+	async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		// The once-daily Predict-results pass (Change 8) rides its OWN cron, separate from the per-minute
+		// live tick — it shares none of runWatch's live-window machinery. Branch on the matched pattern.
+		if (event.cron === PREDICT_RESULTS_CRON) {
+			ctx.waitUntil(runPredictResultsPass(env));
+			return;
+		}
 		ctx.waitUntil(
 			(async () => {
 				const live = await runWatch(env); // first poll — rides the shared 30s edge cache
@@ -1032,6 +1044,75 @@ async function maybeStartNationalActivity(
 	const channelId = await ensureMatchChannel(env, apns, info.matchId);
 	await enqueueLaStart(env, apns, attrs, state, startAlert, tokens, channelId);
 	await env.MATCH_STATE.put(startedKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
+}
+
+/** The once-daily post-match "your Predict result is in" pass (Change 8) — its own cron, NOT the live
+ *  tick. Reads the same yesterday→tomorrow NWSL scoreboard window, keeps SETTLED finals (state "post" &&
+ *  !unfinishedPost), and for each pushes the unseen predictors who opted into `predict_results`. Modeled
+ *  on `checkUpcomingLineups`: a hand-built payload, KV one-shot dedup, retry-until-sent (don't burn the
+ *  marker on a 0-recipient tick, so a late pref-enable within the ~2-day window still lands). Generic copy
+ *  (no score) — the push is the hook; the in-app reveal is the payoff. */
+async function runPredictResultsPass(env: Env): Promise<void> {
+	const sb = supabaseConfig(env);
+	let events: ScoreboardEvent[];
+	try {
+		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500`, {
+			headers: { Accept: "application/json" },
+		});
+		if (!res.ok) {
+			console.log(`[watcher] predict-results scoreboard fetch failed: ${res.status}`);
+			return;
+		}
+		events = ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
+	} catch (err) {
+		console.log(`[watcher] predict-results scoreboard threw: ${err}`);
+		return;
+	}
+
+	for (const event of events) {
+		const match = parseMatch(event);
+		if (!match || match.state !== "post" || match.unfinishedPost) continue; // settled finals only
+		const eventId = match.eventId;
+		const dedupeKey = `predict-result:${eventId}`;
+		if (await env.MATCH_STATE.get(dedupeKey)) continue; // one-shot per fixture — already sent
+
+		let recipients: { tokens: string[]; predictors: number };
+		try {
+			recipients = await predictResultRecipients(sb, eventId);
+		} catch (err) {
+			// Don't mark KV — a transient Supabase read retries on the next daily pass (within the window).
+			console.log(`[watcher] predict-results lookup failed (${eventId}): ${err}`);
+			continue;
+		}
+
+		if (recipients.tokens.length > 0) {
+			const messages = buildMessages(
+				{
+					kind: "v1",
+					payload: toPredictResultPayload(eventId, match.home.abbr, match.away.abbr),
+					apnsTopic: env.APNS_BUNDLE_ID,
+					apnsPushType: "alert",
+					collapseId: `predict:${eventId}`,
+					pruneTable: "device_tokens",
+					pruneColumn: "token",
+					label: `predict_result ${match.home.abbr} vs ${match.away.abbr}`,
+				},
+				recipients.tokens,
+			);
+			await enqueueFanout(env.PUSH_QUEUE, messages);
+			await env.MATCH_STATE.put(dedupeKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
+			console.log(
+				`[watcher] predict-results ${match.home.abbr} vs ${match.away.abbr}: ` +
+					`${recipients.tokens.length} token(s) → ${messages.length} msg(s)`,
+			);
+		} else if (recipients.predictors === 0) {
+			// Nobody predicted this match — mark done so we don't re-scan it every day it's in the window.
+			await env.MATCH_STATE.put(dedupeKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
+		}
+		// predictors > 0 but 0 tokens (all viewed OR pref off): DON'T mark — retry next day within the
+		// window so a late pref-enable / a not-yet-viewed user still gets one push. Bounded by the marker
+		// once anyone is reached, and by the ~2-day scoreboard window otherwise.
+	}
 }
 
 /** SEPARATE pre-kickoff trigger (NOT detectEvents — lineups aren't on the scoreboard): for matches in
