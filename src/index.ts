@@ -162,10 +162,11 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // 75 min gives margin for an early publish. Cron is per-minute → detection fires within ≤60s of the post.
 const LINEUP_LEAD_MS = 75 * 60 * 1000;
 
-// The post-match "your Predict result is in" pass (Change 8) rides its OWN daily cron. 14:00 UTC ≈ 10am
-// EDT / 9am EST — a calm mid-morning window the day after a match, well clear of the FT alert flood.
-// ⚠️ Must match the second entry in wrangler.jsonc `crons` EXACTLY (the scheduled handler branches on it).
-const PREDICT_RESULTS_CRON = "0 14 * * *";
+// The post-match "your Predict result is in" pass (Change 8) runs once daily at this UTC hour — 14:00
+// ≈ 10am EDT / 9am EST, a calm mid-morning window the day after a match, well clear of the FT alert
+// flood. NOT its own cron (account is at the Workers-free 5-cron cap): it rides the per-minute tick,
+// gated to this hour by a once-per-day KV marker. See `maybeRunPredictResultsPass`.
+const PREDICT_RESULTS_HOUR_UTC = 14;
 
 // V2 Live Activity timing.
 const LA_START_LEAD_MS = 20 * 60 * 1000; // remote-start the Activity ≤20 min before kickoff — the token
@@ -320,13 +321,7 @@ export default {
 	// would just re-read the same cached scoreboard). Gated on the live window, so the 23h/day
 	// with no match cost zero extra wall-time / ESPN hits. KV fire-once state chains the two polls
 	// naturally (poll 1 sees 0–0, poll 2 sees 1–0 → fires once, writes state).
-	async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-		// The once-daily Predict-results pass (Change 8) rides its OWN cron, separate from the per-minute
-		// live tick — it shares none of runWatch's live-window machinery. Branch on the matched pattern.
-		if (event.cron === PREDICT_RESULTS_CRON) {
-			ctx.waitUntil(runPredictResultsPass(env));
-			return;
-		}
+	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
 		ctx.waitUntil(
 			(async () => {
 				const live = await runWatch(env); // first poll — rides the shared 30s edge cache
@@ -334,6 +329,10 @@ export default {
 					await sleep(30_000);
 					await runWatch(env, true); // second poll — cache-busted for a fresh ESPN read
 				}
+				// The once-daily Predict-results pass (Change 8) rides THIS per-minute tick (the account is
+				// at the Workers-free 5-cron cap, so it can't have its own cron). Self-gates to ~14:00 UTC
+				// via a once-per-day KV marker — a no-op time check on all but one tick a day.
+				await maybeRunPredictResultsPass(env);
 				// Dead-cron watchdog (2026-07-16): ping healthchecks.io at the END of every tick —
 				// runs even when runWatch failed (the watchdog reports "the cron is ALIVE", not
 				// "the tick succeeded"; tick-level failures already log/diag on their own). If the
@@ -1052,6 +1051,20 @@ async function maybeStartNationalActivity(
  *  on `checkUpcomingLineups`: a hand-built payload, KV one-shot dedup, retry-until-sent (don't burn the
  *  marker on a 0-recipient tick, so a late pref-enable within the ~2-day window still lands). Generic copy
  *  (no score) — the push is the hook; the in-app reveal is the payoff. */
+/** Run the daily Predict-results pass AT MOST ONCE per day, at ~14:00 UTC — called every per-minute tick.
+ *  A cheap hour check short-circuits all but 60 ticks/day; a KV day-marker makes it fire once (the first
+ *  tick of hour 14) and skip the rest. Set the marker BEFORE running so a slow/overlapping tick can't
+ *  double-fire; a run failure is harmless — the per-fixture markers + the 2-day scoreboard window mean
+ *  tomorrow's pass re-checks anything missed. */
+async function maybeRunPredictResultsPass(env: Env): Promise<void> {
+	const now = new Date();
+	if (now.getUTCHours() !== PREDICT_RESULTS_HOUR_UTC) return;
+	const dayKey = `predict-pass:${now.getUTCFullYear()}-${now.getUTCMonth() + 1}-${now.getUTCDate()}`;
+	if (await env.MATCH_STATE.get(dayKey)) return; // already ran today
+	await env.MATCH_STATE.put(dayKey, String(now.getTime()), { expirationTtl: 2 * 86400 });
+	await runPredictResultsPass(env);
+}
+
 async function runPredictResultsPass(env: Env): Promise<void> {
 	const sb = supabaseConfig(env);
 	let events: ScoreboardEvent[];
