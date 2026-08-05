@@ -10,6 +10,9 @@
 	},
 	// Cloudflare's cron floor is 1 minute. Sub-minute polling would need a Durable
 	// Object alarm (scale-only future work).
+	// Just the per-minute live tick. The once-daily post-match Predict-results pass (Change 8) is NOT a
+	// second cron — the account is at the Workers-free cron cap (5: the proxy's 4 + this one). It rides
+	// THIS tick instead, gated to ~14:00 UTC by a once-per-day KV marker (`maybeRunPredictResultsPass`).
 	"triggers": {
 		"crons": ["* * * * *"],
 	},

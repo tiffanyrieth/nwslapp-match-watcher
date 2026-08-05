@@ -147,6 +147,49 @@ export async function resolveTokensForEvent(
 	return { tokens: uniq(tokenRows.map((r) => r.token)), teamOptIns: optedInIds.length, prefEligible: eligibleIds.length };
 }
 
+/** Recipients for the post-match "your Predict result is in" push (Change 8). UNLIKE the live-event
+ *  fan-out, there is NO team-alert gate — PREDICTING the match is itself the opt-in. Gates:
+ *    predict_submission_marks(event_id = eventId)          → who predicted this match
+ *    MINUS predict_result_seen(event_id = eventId)         → drop anyone who already viewed their result
+ *    notification_preferences(user ∈ set, predict_results) → …who opted into this push
+ *    device_tokens(user ∈ eligible)                        → tokens
+ *  `predictors` is returned for diagnostics + the caller's "mark done vs retry" decision (0 predictors
+ *  ⇒ nobody played; don't burn the KV marker). All service_role reads (RLS-bypassing + explicit grants). */
+export async function predictResultRecipients(
+	cfg: SupabaseConfig,
+	eventId: string,
+): Promise<{ tokens: string[]; predictors: number }> {
+	const predictorRows = await rest<{ user_id: string }>(
+		cfg,
+		`predict_submission_marks?event_id=eq.${eventId}&select=user_id`,
+	);
+	const predictorIds = uniq(predictorRows.map((r) => r.user_id));
+	if (predictorIds.length === 0) return { tokens: [], predictors: 0 };
+
+	// Anyone who has already opened their result is dropped — the whole point of the next-day push is
+	// to catch the people who DIDN'T look.
+	const seenRows = await rest<{ user_id: string }>(
+		cfg,
+		`predict_result_seen?event_id=eq.${eventId}&select=user_id`,
+	);
+	const seen = new Set(seenRows.map((r) => r.user_id));
+	const unseenIds = predictorIds.filter((id) => !seen.has(id));
+	if (unseenIds.length === 0) return { tokens: [], predictors: predictorIds.length };
+
+	const prefRows = await rest<{ user_id: string }>(
+		cfg,
+		`notification_preferences?user_id=in.${inList(unseenIds)}&predict_results=eq.true&select=user_id`,
+	);
+	const eligibleIds = uniq(prefRows.map((r) => r.user_id));
+	if (eligibleIds.length === 0) return { tokens: [], predictors: predictorIds.length };
+
+	const tokenRows = await rest<{ token: string }>(
+		cfg,
+		`device_tokens?user_id=in.${inList(eligibleIds)}&select=token`,
+	);
+	return { tokens: uniq(tokenRows.map((r) => r.token)), predictors: predictorIds.length };
+}
+
 /** The NATIONAL-TEAM twin of tokensForEvent: same two gates, but the per-team opt-in comes from
  *  `competition_alert_preferences` (keyed by follow_key "nt:USA"), which the app writes when a user
  *  turns on a national team's bell. The watcher passes the match's two FIFA codes as follow keys. */
