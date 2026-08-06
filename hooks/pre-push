@@ -20,7 +20,50 @@ protected="main"
 zero="0000000000000000000000000000000000000000"
 status=0
 
+
+# ── Personal-info content scan ────────────────────────────────────────────
+# Blocks pushing any commit whose ADDED content or commit MESSAGE matches the
+# private blocklist. The patterns live OUTSIDE the repo (in the operator's
+# home dir) so the blocklist itself is never published. Metadata guards
+# (no-reply author email, GitHub's "block pushes that expose my email") only
+# check WHO authored a commit — this is the missing guard for what a commit
+# CONTAINS. Bypass (on purpose only): git push --no-verify.
+scan_blocklist="$HOME/.config/nwslapp/personal-blocklist.txt"
+
+scan_commits() {
+    _range_head="$1"; _range_base="$2"
+    if [ ! -r "$scan_blocklist" ]; then
+        echo "⚠️  personal-info scan SKIPPED: $scan_blocklist not found." >&2
+        return 0
+    fi
+    if [ "$_range_base" = "$zero" ]; then
+        _revs=$(git rev-list "$_range_head" --not --remotes 2>/dev/null)
+    else
+        _revs=$(git rev-list "$_range_base..$_range_head" 2>/dev/null)
+    fi
+    _scan_status=0
+    for _c in $_revs; do
+        _hits=$( {
+            git show --no-patch --format=%B "$_c"
+            git show --format= "$_c" | grep -E '^\+' | grep -v '^+++'
+        } | grep -i -E -f "$scan_blocklist" )
+        if [ -n "$_hits" ]; then
+            echo "" >&2
+            echo "🛑 PUSH BLOCKED: commit $(git rev-parse --short "$_c") contains personal info:" >&2
+            echo "$_hits" | head -3 | sed 's/^/     /' >&2
+            echo "   Remove it (amend/rebase) before pushing. Blocklist: $scan_blocklist" >&2
+            echo "" >&2
+            _scan_status=1
+        fi
+    done
+    return $_scan_status
+}
+
 while read -r local_ref local_oid remote_ref remote_oid; do
+    # content scan runs for EVERY ref (personal info must not reach ANY public branch)
+    if [ "$local_oid" != "$zero" ]; then
+        scan_commits "$local_oid" "$remote_oid" || status=1
+    fi
     [ "$remote_ref" = "refs/heads/$protected" ] || continue
 
     if [ "$local_oid" = "$zero" ]; then
