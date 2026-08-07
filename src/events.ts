@@ -22,6 +22,11 @@
 export interface ScoreboardEvent {
 	id: string;
 	date?: string;
+	/** Season slug on the EVENT (not the league-level season object, whose shape differs): the NWSL
+	 *  feed serves regular season AND playoffs on one slug, distinguished only by
+	 *  `season.slug = "playoffs---quarterfinals|semifinals|championship"` (live-verified 2026-08-06).
+	 *  Read for the competition label only — unknown/missing slugs fall back to the feed's label. */
+	season?: { slug?: string | null };
 	status?: EventStatus;
 	competitions?: Array<{
 		status?: EventStatus;
@@ -99,6 +104,11 @@ export interface Match {
 	/** Venue name ("Audi Field") + broadcast label ("Victory+") — for the kickoff body. Best-effort. */
 	venue?: string;
 	broadcast?: string;
+	/** Competition label ("Challenge Cup", "CONCACAF", "NWSL Playoffs") — set by the caller AFTER
+	 *  parseMatch (parseMatch can't know the source feed), read only by the kickoff subtitle so a
+	 *  cup push says which competition it is. Unset/"NWSL" ⇒ the subtitle stays exactly as before
+	 *  (the proven copy for regular-season pushes never changes). */
+	competition?: string;
 }
 
 /** What we persist per match in KV between polls. */
@@ -420,9 +430,12 @@ function goalSubtitle(match: Match, play?: ScoringPlay): string {
 }
 
 /** Kickoff subtitle: "Audi Field · Victory+" — where + how to watch (the old body's info,
- *  preserved). Falls back to venue-only, then a generic line, when ESPN omits a field. */
+ *  preserved). Falls back to venue-only, then a generic line, when ESPN omits a field.
+ *  Non-league matches lead with the competition ("CONCACAF · Estadio Hidalgo · Paramount+") so the
+ *  one push that sets context says which cup it is; plain "NWSL" adds nothing and stays omitted. */
 function kickoffSubtitle(match: Match): string {
-	const parts = [match.venue, match.broadcast].filter((s): s is string => !!s);
+	const comp = match.competition && match.competition !== "NWSL" ? match.competition : undefined;
+	const parts = [comp, match.venue, match.broadcast].filter((s): s is string => !!s);
 	return parts.length ? parts.join(" · ") : "The match is underway";
 }
 

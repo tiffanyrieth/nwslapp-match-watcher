@@ -52,6 +52,18 @@ test("kickoff: colon title, venue · broadcast subtitle", () => {
 	assert.equal(ev.subtitle, "Audi Field · ESPN");
 });
 
+test("kickoff: cup competition leads the subtitle; plain NWSL stays omitted", () => {
+	// A cup match says which competition it is — the one push that sets context (2026-08-06).
+	const cup = match({ clock: 60, venue: "Estadio Hidalgo", broadcast: "Paramount+", competition: "CONCACAF" });
+	assert.equal(firstOf("kickoff", stored({ state: "pre" }), cup).subtitle, "CONCACAF · Estadio Hidalgo · Paramount+");
+	// "NWSL" adds nothing on a league match — the proven regular-season copy is byte-identical.
+	const league = match({ clock: 60, venue: "Audi Field", broadcast: "ESPN", competition: "NWSL" });
+	assert.equal(firstOf("kickoff", stored({ state: "pre" }), league).subtitle, "Audi Field · ESPN");
+	// No venue/broadcast → the label still leads over the generic fallback.
+	const bare = match({ clock: 60, competition: "Challenge Cup" });
+	assert.equal(firstOf("kickoff", stored({ state: "pre" }), bare).subtitle, "Challenge Cup");
+});
+
 // ── goal ────────────────────────────────────────────────────────────────────
 
 test("goal: colon title (scoring club), SCORER-first subtitle", () => {

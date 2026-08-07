@@ -47,6 +47,50 @@ export interface FixtureIndex {
 /** The club scoreboard's feed key in the index (NT feeds use their ESPN league slug). */
 export const NWSL_FEED = "nwsl";
 
+/** CLUB feeds: the NWSL league feed + the two cup competitions NWSL clubs play in. All flow
+ *  through the SAME club detect loop in index.ts (per-team fan-out by ESPN team id, V2 LA start +
+ *  broadcast sync, lineup pass) — a followed club alerts identically whether the fixture is
+ *  league, Challenge Cup, or Champions Cup (the 2026-08 gap fix: the cups were in the app's
+ *  calendar but never polled here). Both cups are seasonal (Challenge Cup ≈ one match/yr) → the
+ *  fixture-window gate makes them free at rest; a foreign Champions Cup opponent simply matches
+ *  zero follower rows, so fan-out stays correct for free. */
+export const CLUB_FEEDS = [NWSL_FEED, "usa.nwsl.cup", "concacaf.w.champions_cup"] as const;
+
+/** Feed slug → the SHORT competition label shown on the V2 card's bottom-left + the V1 kickoff
+ *  subtitle. Deliberately terse (owner 2026-08-06): the card's label slot is small, and long names
+ *  add payload bytes for no glanceable value. The label is a VALUE in the existing `competition`
+ *  attribute — never a structure change (START-PAYLOAD LAW, docs/live-activity-v2.md §0). */
+export const FEED_LABEL: Record<string, string> = {
+	[NWSL_FEED]: "NWSL",
+	"usa.nwsl.cup": "Challenge Cup",
+	"concacaf.w.champions_cup": "CONCACAF",
+	"fifa.friendly.w": "Friendly",
+	"fifa.shebelieves": "SheBelieves",
+	"concacaf.w.gold": "Gold Cup",
+	"concacaf.womens.championship": "W Championship",
+	"uefa.weuro": "Euro",
+	"fifa.wwc": "World Cup",
+	"fifa.w.olympics": "Olympics",
+	"uefa.w.nations": "Nations League",
+	"fifa.wworldq.uefa": "WC Qualifying",
+	"afc.w.asian.cup": "Asian Cup",
+	"caf.w.nations": "WAFCON",
+	"conmebol.america.femenina": "Copa América",
+	"fifa.wwcq.ply": "WC Qualifying",
+	"fifa.w.concacaf.olympicsq": "Olympic Qualifying",
+	"global.pinatar_cup": "Pinatar Cup",
+	"global.w.finalissima": "Finalissima",
+};
+
+/** Competition label for a club-feed event: the feed's label, except NWSL postseason fixtures —
+ *  ESPN serves playoffs on the same feed with `season.slug = "playoffs---…"` (live-verified
+ *  2026-08-06) → "NWSL Playoffs". HARD FALLBACK to the plain feed label on any unknown slug shape. */
+export const clubEventLabel = (feed: string, event: ScoreboardEvent): string => {
+	const base = FEED_LABEL[feed] ?? "NWSL";
+	if (feed === NWSL_FEED && event.season?.slug?.startsWith("playoffs")) return "NWSL Playoffs";
+	return base;
+};
+
 /** Rebuild the index this often. 6h keeps schedule changes ≤6h stale (fixtures are announced
  *  weeks out) at ~4 sweeps × 16 feeds = ~64 proxy fetches/day. */
 export const DISCOVERY_INTERVAL_MS = 6 * 60 * 60 * 1000;

@@ -47,7 +47,7 @@ import {
 // "Exceeded CPU Time Limits" errors. This worker only builds card URLs (CARD_PUBLIC_URL) and
 // 302-redirects any /card request that lands here (late-delivered pushes carry the old origin).
 import { activityTokensForMatch, allDeviceTokens, allStartTokens, predictResultRecipients, resolveTokensForEvent, startTokensForCompetition, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
-import { activeFeeds, buildIndex, DISCOVERY_INTERVAL_MS, discoveryDue, kickoffMs, liveMissedByIndex, NWSL_FEED, reconcileFeed, type FixtureIndex } from "./fixtures";
+import { activeFeeds, buildIndex, CLUB_FEEDS, clubEventLabel, DISCOVERY_INTERVAL_MS, discoveryDue, FEED_LABEL, kickoffMs, liveMissedByIndex, NWSL_FEED, reconcileFeed, type FixtureIndex } from "./fixtures";
 import { buildStartAps, endLiveActivity, liveTopic, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
 import { buildMessages, collapseIdFor, enqueueFanout, type FanoutMessage } from "./fanout";
@@ -130,6 +130,7 @@ const NT_LEAGUES = [
 	"fifa.wwcq.ply",
 	"fifa.w.concacaf.olympicsq",
 	"global.pinatar_cup",
+	"global.w.finalissima", // Euro champ vs Copa América champ — one seasonal match (added 2026-08-06)
 ] as const;
 
 // A national-team match event → the two `competition_alert_preferences` follow keys to fan out to
@@ -471,7 +472,7 @@ async function refetchMatch(env: Env, eventId: string): Promise<Match | null> {
 		// DEBUG: the VAR-correction re-poll must also see the synthetic fixture (it's injected client-side,
 		// not in the real proxy scoreboard) — else a fake disallow could never confirm.
 		const fake = await readFakeMatch(env);
-		const found = fake && fake.id === eventId ? fake : evs.find((e) => e.id === eventId);
+		const found = fake && fake.event.id === eventId ? fake.event : evs.find((e) => e.id === eventId);
 		return found ? parseMatch(found) : null;
 	} catch (err) {
 		console.log(`[watcher] correction re-poll threw: ${err}`);
@@ -518,7 +519,7 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	const feedEvents = new Map<string, ScoreboardEvent[]>();
 	let indexDirty = false;
 	if (discoveryDue(index, now)) {
-		const allFeeds = [NWSL_FEED, ...NT_LEAGUES];
+		const allFeeds = [...CLUB_FEEDS, ...NT_LEAGUES];
 		for (const feed of allFeeds) {
 			const evs = await fetchFeed(feed);
 			if (evs) feedEvents.set(feed, evs);
@@ -553,15 +554,36 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 		}
 	}
 
-	let events: ScoreboardEvent[] = feedEvents.get(NWSL_FEED) ?? [];
+	// Merge ALL club feeds (league + cups) into the ONE event list the club detect loop, LA-start
+	// pass, and lineup pass consume — this line WAS `feedEvents.get(NWSL_FEED)` only, which is why a
+	// followed club's cup matches never alerted. `eventFeed` remembers each event's source feed:
+	// it drives the competition label + the lineup pass's `/summary?league=`. Dedupe by event id in
+	// case ESPN ever lists one fixture on two feeds (first feed wins — CLUB_FEEDS order puts NWSL first).
+	const eventFeed = new Map<string, string>();
+	const events: ScoreboardEvent[] = [];
+	for (const feed of CLUB_FEEDS) {
+		for (const ev of feedEvents.get(feed) ?? []) {
+			if (eventFeed.has(ev.id)) continue;
+			eventFeed.set(ev.id, feed);
+			events.push(ev);
+		}
+	}
 
 	// DEBUG HARNESS: inject the KV-flagged synthetic fixture into the FULL event list, so the cron's real
 	// club detect loop (kickoff/goal/FT + V2 broadcast), LA-start pass, and lineup pass all process it —
 	// exercising the whole organic V2 lifecycle. No-op unless POST /debug/fake-match set the flag.
 	// Deliberately OUTSIDE the fixture-window gate: the harness works even on a quiet day with zero
-	// real fixtures (its KV read is the only per-tick cost besides the index read).
-	const fakeEvent = await readFakeMatch(env);
-	if (fakeEvent) events = [...events, fakeEvent];
+	// real fixtures (its KV read is the only per-tick cost besides the index read). Injected AFTER the
+	// feed merge, with its own (spec-chosen) feed slug, so a fake cup match exercises the label path.
+	const fake = await readFakeMatch(env);
+	if (fake) {
+		events.push(fake.event);
+		eventFeed.set(fake.event.id, fake.feed);
+	}
+
+	/** The competition label for any event in the merged club list (fake match included). */
+	const labelFor = (event: ScoreboardEvent): string =>
+		clubEventLabel(eventFeed.get(event.id) ?? NWSL_FEED, event);
 
 	// Is any match in the live window (in-progress or near kickoff, excluding finished)? This is the
 	// signal `scheduled` uses to fire a second 30s poll this minute. Computed over the club scoreboard;
@@ -583,6 +605,9 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 
 		const match = parseMatch(event); // null unless "in" or "post" with both team ids
 		if (!match) continue;
+		// Competition label (from the source feed) — read only by the kickoff subtitle, so a cup
+		// kickoff push says which competition it is. parseMatch can't know the feed; set it here.
+		match.competition = labelFor(event);
 
 		const key = `match:${match.eventId}`;
 		const prev = await env.MATCH_STATE.get<StoredState>(key, "json");
@@ -685,7 +710,7 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 			// which excludes future matches). Only acts on USA matches with LA opt-ins; else a cheap no-op.
 			if (ko >= now && ko - now <= LA_START_LEAD_MS) {
 				try {
-					await maybeStartNationalActivity(env, event, ko, sb, apns);
+					await maybeStartNationalActivity(env, event, ko, sb, apns, FEED_LABEL[slug] ?? "International");
 				} catch (err) {
 					console.log(`[watcher] USWNT LA start pass failed: ${err}`);
 				}
@@ -734,7 +759,7 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	// SEPARATE pass (not tangled into detectEvents): remote-start a Live Activity for any match
 	// kicking off within the next ~5 min that a signed-in user has alerts ON for. KV-deduped.
 	try {
-		await startUpcomingActivities(env, events, sb, apns);
+		await startUpcomingActivities(env, events, sb, apns, labelFor);
 	} catch (err) {
 		console.log(`[watcher] LA start pass failed: ${err}`);
 	}
@@ -742,7 +767,7 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	// SEPARATE pass: poll /summary for matches in the pre-kickoff window and push "Lineups in" once
 	// both starting XIs are posted. KV-deduped; isolated so a /summary hiccup can't break score alerts.
 	try {
-		await checkUpcomingLineups(env, events, sb, apns);
+		await checkUpcomingLineups(env, events, sb, apns, (ev) => eventFeed.get(ev.id) ?? NWSL_FEED);
 	} catch (err) {
 		console.log(`[watcher] lineup pass failed: ${err}`);
 	}
@@ -857,8 +882,11 @@ interface FakeMatchSpec {
 	id: string; homeId: string; homeAbbr: string; awayId: string; awayAbbr: string;
 	kickoffMs: number; ftMs: number;
 	goals: FakeGoal[]; reds: FakeRed[];
+	/** Source feed the synthetic fixture pretends to come from (default NWSL) — lets a fake CUP
+	 *  match exercise the competition-label path organically ("Challenge Cup" on the device card). */
+	feed?: string;
 }
-async function readFakeMatch(env: Env): Promise<ScoreboardEvent | null> {
+async function readFakeMatch(env: Env): Promise<{ event: ScoreboardEvent; feed: string } | null> {
 	const spec = (await env.MATCH_STATE.get("debug:fake-match", "json")) as FakeMatchSpec | null;
 	if (!spec) return null;
 	const now = Date.now();
@@ -886,7 +914,7 @@ async function readFakeMatch(env: Env): Promise<ScoreboardEvent | null> {
 		details.push({ redCard: true, type: { text: "Red Card" }, team: { id: sideId(r.side) }, clock: { displayValue: `${r.minute}'` }, athletesInvolved: [{ shortName: r.player, displayName: r.player }] });
 	}
 	const status = { type: { state, name }, period, clock };
-	return {
+	const event: ScoreboardEvent = {
 		id: spec.id,
 		date: new Date(spec.kickoffMs).toISOString(),
 		status,
@@ -902,6 +930,7 @@ async function readFakeMatch(env: Env): Promise<ScoreboardEvent | null> {
 			},
 		],
 	};
+	return { event, feed: spec.feed ?? NWSL_FEED };
 }
 
 /** POST /debug/fake-match — schedule (or clear) a FULL synthetic match. Default script (both teams 2
@@ -914,11 +943,16 @@ async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
 		return new Response("forbidden", { status: 403 });
 	}
-	let p: { gapSec?: number; homeId?: string; homeAbbr?: string; awayId?: string; awayAbbr?: string; clear?: boolean } = {};
+	let p: { gapSec?: number; homeId?: string; homeAbbr?: string; awayId?: string; awayAbbr?: string; feed?: string; clear?: boolean } = {};
 	try {
 		p = (await request.json()) as typeof p;
 	} catch {
 		/* empty body → defaults */
+	}
+	// Optional source feed — lets a fake CUP match exercise the competition-label path end-to-end
+	// (e.g. {"feed":"usa.nwsl.cup"} → "Challenge Cup" on the device card). Club feeds only.
+	if (p.feed && !(CLUB_FEEDS as readonly string[]).includes(p.feed)) {
+		return new Response(`unknown feed "${p.feed}" (use one of: ${CLUB_FEEDS.join(", ")})`, { status: 400 });
 	}
 	const j = (body: unknown, status = 200) => new Response(JSON.stringify(body, null, 2), { status, headers: { "Content-Type": "application/json" } });
 	if (p.clear) {
@@ -945,6 +979,7 @@ async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 		homeId: p.homeId ?? "18206", homeAbbr: p.homeAbbr ?? "ORL",
 		awayId: p.awayId ?? "15360", awayAbbr: p.awayAbbr ?? "CHI",
 		kickoffMs, ftMs, goals, reds,
+		...(p.feed ? { feed: p.feed } : {}),
 	};
 	await env.MATCH_STATE.put("debug:fake-match", JSON.stringify(spec), { expirationTtl: Math.ceil((ftMs - now) / 1000) + 600 });
 	const rel = (ms: number) => `+${Math.round((ms - now) / 60_000)}m`;
@@ -968,6 +1003,9 @@ async function startUpcomingActivities(
 	events: ScoreboardEvent[],
 	sb: SupabaseConfig,
 	apns: ApnsConfig,
+	// Competition label per event ("NWSL" / "NWSL Playoffs" / "Challenge Cup" / "CONCACAF") — a VALUE
+	// for the existing `competition` attribute only; the payload structure is untouched (§0 law).
+	labelFor: (event: ScoreboardEvent) => string = () => "NWSL",
 ): Promise<void> {
 	const now = Date.now();
 	for (const event of events) {
@@ -985,7 +1023,7 @@ async function startUpcomingActivities(
 			continue;
 		}
 		if (tokens.length === 0) continue; // no opt-ins yet — retry next poll, still inside the window
-		const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr);
+		const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr, labelFor(event));
 		const state = preContentState(kickoffLabel(ko));
 		// ARRIVAL-BUZZ LAW (corrected 2026-07-09 against the 7/5 A/B logs — see docs/live-activity-v2.md §3):
 		// TWO INDEPENDENT requirements — proven separately 7/11, do NOT conflate them (this is what
@@ -1018,6 +1056,9 @@ async function maybeStartNationalActivity(
 	ko: number,
 	sb: SupabaseConfig,
 	apns: ApnsConfig,
+	// Short competition label from the NT feed slug ("SheBelieves", "WAFCON", …) — a VALUE for the
+	// existing `competition` attribute; "International" stays the fallback (§0: never a structure change).
+	label = "International",
 ): Promise<void> {
 	const info = upcomingInfo(event);
 	if (!info) return;
@@ -1032,7 +1073,7 @@ async function maybeStartNationalActivity(
 		return;
 	}
 	if (tokens.length === 0) return; // no LA opt-ins yet — retry next poll, still inside the window
-	const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr, "International", true);
+	const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr, label, true);
 	const state = preContentState(kickoffLabel(ko));
 	// Buzz-once arrival, then silent (see the club start above + docs/live-activity-v2.md §3).
 	const startAlert = {
@@ -1132,13 +1173,17 @@ async function runPredictResultsPass(env: Env): Promise<void> {
  *  the pre-kickoff window, poll the per-match `/summary` and, the tick BOTH starting XIs are posted, push
  *  a one-shot "Lineups in" alert to everyone with `lineup_posted` on for a participating team. KV-deduped.
  *  `/summary` is fetched CACHE-BUSTED so detection sees ESPN's live state each tick (independent of the
- *  proxy's pre-kickoff TTL), firing within ≤60s of the post. NWSL only for now (NT feeds would multiply
- *  the per-minute /summary fetches). */
+ *  proxy's pre-kickoff TTL), firing within ≤60s of the post. CLUB feeds only (league + cups, via the
+ *  merged event list — cup fixtures pass their league slug to /summary); NT feeds stay excluded
+ *  (they'd multiply the per-minute /summary fetches). */
 async function checkUpcomingLineups(
 	env: Env,
 	events: ScoreboardEvent[],
 	sb: SupabaseConfig,
 	apns: ApnsConfig,
+	// Source feed per event: cup fixtures need `/summary?league=<slug>` (the proxy's summary is
+	// NWSL by default; league param added 2026-08-06). NWSL omits the param — old behavior exactly.
+	feedFor: (event: ScoreboardEvent) => string = () => NWSL_FEED,
 ): Promise<void> {
 	const now = Date.now();
 	for (const event of events) {
@@ -1159,13 +1204,21 @@ async function checkUpcomingLineups(
 		const pubKey = `lineup-pub:${info.matchId}`;
 		let published = (await env.MATCH_STATE.get(pubKey)) !== null;
 		if (!published) {
-			// Cache-busted so we see ESPN's live state, not a cached pre-lineup shell.
+			// Cache-busted so we see ESPN's live state, not a cached pre-lineup shell. Cup fixtures
+			// carry their league slug; NWSL omits it (proxy default — unchanged old behavior).
+			const feed = feedFor(event);
+			const leagueParam = feed === NWSL_FEED ? "" : `&league=${encodeURIComponent(feed)}`;
 			let summary: unknown;
 			try {
-				const res = await env.PROXY.fetch(`${PROXY_SUMMARY}?event=${info.matchId}&_lc=${now}`, {
+				const res = await env.PROXY.fetch(`${PROXY_SUMMARY}?event=${info.matchId}${leagueParam}&_lc=${now}`, {
 					headers: { Accept: "application/json" },
 				});
-				if (!res.ok) continue;
+				if (!res.ok) {
+					// NO SILENT FAILURES: a cup summary that 400s/404s (ESPN may not serve rosters for
+					// every competition) must be observable, not a quiet no-lineups-push.
+					if (feed !== NWSL_FEED) console.log(`[watcher] DIAG cup lineup summary ${res.status} (${feed}/${info.matchId}) — no lineup push for this match`);
+					continue;
+				}
 				summary = await res.json();
 			} catch (err) {
 				console.log(`[watcher] lineup summary fetch failed (${info.matchId}): ${err}`);
