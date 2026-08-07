@@ -13,6 +13,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
 	ACTIVE_LEAD_MS,
+	CLUB_FEEDS,
+	clubEventLabel,
+	FEED_LABEL,
 	ACTIVE_TAIL_MS,
 	activeFeeds,
 	buildIndex,
@@ -248,4 +251,28 @@ test("FAIL-OPEN: a post event with no `completed` and no known status name still
 	const now = Date.now();
 	const index = buildIndex(new Map([["nwsl", [event("p1", now - 2 * 3600_000, "post")]]]), now);
 	assert.equal(index.fixtures[0].ended, true);
+});
+
+// ── competition labels (clubEventLabel / FEED_LABEL / CLUB_FEEDS, added 2026-08-06) ───────────
+
+test("clubEventLabel: cup feeds get their short label; NWSL playoffs get 'NWSL Playoffs'", () => {
+	const ev = (slug?: string) => ({ id: "e1", ...(slug !== undefined ? { season: { slug } } : {}) });
+	assert.equal(clubEventLabel("usa.nwsl.cup", ev()), "Challenge Cup");
+	assert.equal(clubEventLabel("concacaf.w.champions_cup", ev()), "CONCACAF");
+	assert.equal(clubEventLabel("nwsl", ev()), "NWSL");
+	assert.equal(clubEventLabel("nwsl", ev("regular-season")), "NWSL");
+	// Live-verified slugs (2026-08-06): playoffs---quarterfinals / semifinals / championship.
+	assert.equal(clubEventLabel("nwsl", ev("playoffs---quarterfinals")), "NWSL Playoffs");
+	assert.equal(clubEventLabel("nwsl", ev("playoffs---championship")), "NWSL Playoffs");
+	// HARD FALLBACK: unknown feed or slug shape can never break labeling.
+	assert.equal(clubEventLabel("nwsl", ev(null as unknown as string)), "NWSL");
+	assert.equal(clubEventLabel("some.future.feed", ev()), "NWSL");
+	// Playoff detection is NWSL-feed-only (a cup feed's own slugs never relabel it).
+	assert.equal(clubEventLabel("concacaf.w.champions_cup", ev("playoffs---semifinals")), "CONCACAF");
+});
+
+test("CLUB_FEEDS: NWSL first (dedupe priority) + both cup slugs; every feed has a label", () => {
+	assert.equal(CLUB_FEEDS[0], "nwsl");
+	assert.deepEqual([...CLUB_FEEDS], ["nwsl", "usa.nwsl.cup", "concacaf.w.champions_cup"]);
+	for (const feed of CLUB_FEEDS) assert.ok(FEED_LABEL[feed], `label missing for ${feed}`);
 });

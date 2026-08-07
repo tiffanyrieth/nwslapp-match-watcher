@@ -284,25 +284,56 @@ export async function startTokensForTeams(cfg: SupabaseConfig, teamIds: string[]
 	return uniq(rows.map((r) => r.token));
 }
 
-/** The NATIONAL-TEAM twin of startTokensForTeams (USWNT V2): push-to-start tokens for users who follow
- *  this competition (`competition_alert_preferences.follow_key` = "nt:USA") with alerts ON, have opted IN
- *  to Live Activities, and registered a push-to-start token. Same two-gate + token-resolve tail. */
-export async function startTokensForCompetition(cfg: SupabaseConfig, followKey: string): Promise<string[]> {
-	const alertRows = await rest<{ user_id: string }>(
+/** The NATIONAL-TEAM twin of startTokensForTeams, BATCHED across every match starting this tick
+ *  (all-NT V2 LA, 2026-08-06): push-to-start tokens for users following ANY of `followKeys`
+ *  ("nt:JPN", "nt:ZAM", …) with alerts ON, Live Activities opted IN, and a registered token —
+ *  grouped per follow key so the caller can target each match's audience.
+ *  ⚠️ STRESS-GATE REQUIREMENT (docs/stress-testing.md §7, all-NT entry): exactly 3 external REST
+ *  calls PER TICK regardless of how many NT matches share a kickoff cluster — the old unbatched
+ *  per-match shape (3 × N) breaches the 50-external budget at an 8-match FIFA-window cluster. */
+export async function startTokensByCompetitionKey(cfg: SupabaseConfig, followKeys: string[]): Promise<Map<string, string[]>> {
+	if (followKeys.length === 0) return new Map();
+	const alertRows = await rest<{ user_id: string; follow_key: string }>(
 		cfg,
-		`competition_alert_preferences?follow_key=in.${inListQuoted([followKey])}&alerts_enabled=eq.true&select=user_id`,
+		`competition_alert_preferences?follow_key=in.${inListQuoted(followKeys)}&alerts_enabled=eq.true&select=user_id,follow_key`,
 	);
 	const ids = uniq(alertRows.map((r) => r.user_id));
-	if (ids.length === 0) return [];
+	if (ids.length === 0) return new Map();
 	const prefRows = await rest<{ user_id: string }>(
 		cfg,
 		`notification_preferences?user_id=in.${inList(ids)}&live_activities_enabled=eq.true&select=user_id`,
 	);
 	const enabledIds = uniq(prefRows.map((r) => r.user_id));
-	if (enabledIds.length === 0) return [];
-	const rows = await rest<{ token: string }>(
+	if (enabledIds.length === 0) return new Map();
+	const tokenRows = await rest<{ user_id: string; token: string }>(
 		cfg,
-		`live_activity_start_tokens?user_id=in.${inList(enabledIds)}&select=token`,
+		`live_activity_start_tokens?user_id=in.${inList(enabledIds)}&select=user_id,token`,
 	);
-	return uniq(rows.map((r) => r.token));
+	return groupStartTokensByKey(alertRows, enabledIds, tokenRows);
+}
+
+/** Pure grouping tail of startTokensByCompetitionKey (split out for node --test): follow_key →
+ *  uniq'd tokens of its LA-enabled followers. A user following both sides of one match appears
+ *  under both keys — the CALLER unions + uniqs per match so nobody is double-pushed. */
+export function groupStartTokensByKey(
+	alertRows: Array<{ user_id: string; follow_key: string }>,
+	enabledIds: string[],
+	tokenRows: Array<{ user_id: string; token: string }>,
+): Map<string, string[]> {
+	const enabled = new Set(enabledIds);
+	const tokensByUser = new Map<string, string[]>();
+	for (const t of tokenRows) {
+		if (!tokensByUser.has(t.user_id)) tokensByUser.set(t.user_id, []);
+		tokensByUser.get(t.user_id)!.push(t.token);
+	}
+	const out = new Map<string, string[]>();
+	for (const a of alertRows) {
+		if (!enabled.has(a.user_id)) continue;
+		const toks = tokensByUser.get(a.user_id);
+		if (!toks) continue;
+		if (!out.has(a.follow_key)) out.set(a.follow_key, []);
+		out.get(a.follow_key)!.push(...toks);
+	}
+	for (const [k, v] of out) out.set(k, uniq(v));
+	return out;
 }
