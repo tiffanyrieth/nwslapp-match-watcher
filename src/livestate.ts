@@ -11,10 +11,14 @@ import type { LiveAttributes, LiveContentState, LivePhase } from "./activitykit"
 import type { Match, ScoreboardEvent } from "./events";
 
 // NWSL brand hex by abbreviation (no '#') — mirrors NWSLApp DesignTeamColors.palette.
+// ⚠️ KEEP IN SYNC BY HAND: the app palette had a "verified 2026" brand-color pass (official club
+// colors, dark-canvas legible) that this map missed for months — V2 cards washed 6 clubs in stale
+// hues (e.g. Portland's old pink FF4D6D vs the official Vivid Red EF3340). Re-diff against
+// DesignTeamColors.swift whenever either side changes a value. (Synced 2026-08-06.)
 const TEAM_HEX: Record<string, string> = {
-	LA: "E6447B", BAY: "2F80E8", BOS: "2FA85A", CHI: "6BA4FF", DEN: "239E80", GFC: "7FD4C1",
-	HOU: "FF8A3D", KC: "30C7E8", NC: "E0354B", SEA: "6E7FFF", ORL: "B07CE8", POR: "FF4D6D",
-	LOU: "C7A8FF", SD: "FFB340", UTA: "FFD60A", WAS: "FF4D5E",
+	LA: "E6447B", BAY: "2F80E8", BOS: "26D07C", CHI: "00A3E0", DEN: "239E80", GFC: "9ADBE8",
+	HOU: "FF6900", KC: "30C7E8", NC: "E0354B", SEA: "6E7FFF", ORL: "B07CE8", POR: "EF3340",
+	LOU: "C7A8FF", SD: "FFA400", UTA: "FFD60A", WAS: "FF4D5E",
 };
 // National-team brand hex by FIFA code — mirrors NWSLApp Models/NationalTeam (brandHex). So a USWNT V2
 // card's team-color wash uses the country's real colors (USA blue vs CAN red) instead of a flat grey.
@@ -24,8 +28,22 @@ const NT_HEX: Record<string, string> = {
 	JAM: "F4C20D", JPN: "E0322B", AUS: "F4C20D", FRA: "2E5BE0", GER: "E0322B", HAI: "2E5BE0",
 	KOR: "E0322B", NGA: "1FA463", ESP: "E8413A", SWE: "3A7BE0",
 };
+// Foreign clubs that face NWSL sides in the Concacaf W Champions Cup — mirrors (and extends) the
+// app's DesignTeamColors.international. Real brand colors, dark-canvas brightened where the brand
+// is a near-black navy (the same treatment the app gives Bay FC): without these a cup card's
+// foreign side washes flat grey. Grow per season as the field changes; keep identical to the
+// app's map (A1 adds the 5 new ones there).
+const INTERNATIONAL_HEX: Record<string, string> = {
+	AME: "FFCC00", // Club América (Águilas yellow — matches the app)
+	PAC: "1E4FB0", // Pachuca (Tuzos blue — matches the app)
+	MON: "4D7DD6", // Monterrey (Rayadas navy, brightened for the dark canvas)
+	ALI: "3E63D4", // Alianza FC (SLV — royal blue, brightened)
+	ALA: "E03A31", // LD Alajuelense (CRC — La Liga red)
+	CFC: "FFC61A", // Chorrillo FC (PAN — crest gold)
+	VAN: "17A3A8", // Vancouver Rise FC Academy (CAN — Rise teal, brightened)
+};
 export const colorHex = (abbr: string): string =>
-	TEAM_HEX[abbr.toUpperCase()] ?? NT_HEX[abbr.toUpperCase()] ?? "8E8E93";
+	TEAM_HEX[abbr.toUpperCase()] ?? NT_HEX[abbr.toUpperCase()] ?? INTERNATIONAL_HEX[abbr.toUpperCase()] ?? "8E8E93";
 
 function phaseFromMatch(m: Match): LivePhase {
 	if (m.state === "post") return "fulltime";
