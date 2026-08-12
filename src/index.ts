@@ -85,6 +85,11 @@ export interface Env {
 
 	/** Shared secret guarding the manual /test-push route. */
 	MANUAL_TRIGGER_SECRET: string;
+
+	/** The proxy's KHG publish key — held so the Monday publish pass can POST /knowher/publish-verified
+	 *  (2026-08-12 split). Optional: while unset, the Monday pass is a no-op (not armed). Set at the
+	 *  supervised-first-run gate, AFTER the first run is proven by hand. */
+	KNOWHER_INGEST_KEY?: string;
 }
 
 // The sibling proxy's scoreboard route, reached via the PROXY service binding (host is
@@ -171,6 +176,15 @@ const LINEUP_LEAD_MS = 75 * 60 * 1000;
 // flood. NOT its own cron (account is at the Workers-free 5-cron cap): it rides the per-minute tick,
 // gated to this hour by a once-per-day KV marker. See `maybeRunPredictResultsPass`.
 const PREDICT_RESULTS_HOUR_UTC = 14;
+
+// The MONDAY Know Her Game publish (2026-08-12 weekend/Monday split). The weekend verify gate stages a
+// HUMAN-ONLY pool; this pass calls the proxy's /knowher/publish-verified, which injects FRESH ESPN stats
+// (so Sunday-night games count) + Lever 1, and publishes. Fires on UTC MONDAY at this hour — 10:00 UTC
+// (= 3am PDT / 6am EDT): after Sunday-night finals settle, and comfortably before the earliest user's
+// on-device Monday-10am-LOCAL nudge (10am ET = 14:00/15:00 UTC). Like the Predict pass it rides the
+// per-minute tick (5-cron-free cap), gated by a once-per-week KV marker. No-op if KNOWHER_INGEST_KEY unset.
+const KNOWHER_PUBLISH_HOUR_UTC = 10;
+const KNOWHER_PUBLISH_WEEKDAY_UTC = 1; // getUTCDay(): Sun=0, Mon=1
 
 // V2 Live Activity timing.
 const LA_START_LEAD_MS = 20 * 60 * 1000; // remote-start the Activity ≤20 min before kickoff — the token
@@ -337,6 +351,9 @@ export default {
 				// at the Workers-free 5-cron cap, so it can't have its own cron). Self-gates to ~14:00 UTC
 				// via a once-per-day KV marker — a no-op time check on all but one tick a day.
 				await maybeRunPredictResultsPass(env);
+				// The Monday KHG publish (2026-08-12 split) rides this tick too — self-gates to Monday
+				// ~10:00 UTC via a once-per-week KV marker, a no-op time check on every other tick.
+				await maybeRunKnowHerPublishPass(env);
 				// Dead-cron watchdog (2026-07-16): ping healthchecks.io at the END of every tick —
 				// runs even when runWatch failed (the watchdog reports "the cron is ALIVE", not
 				// "the tick succeeded"; tick-level failures already log/diag on their own). If the
@@ -1202,6 +1219,38 @@ async function runPredictResultsPass(env: Env): Promise<void> {
 		// predictors > 0 but 0 tokens (all viewed OR pref off): DON'T mark — retry next day within the
 		// window so a late pref-enable / a not-yet-viewed user still gets one push. Bounded by the marker
 		// once anyone is reached, and by the ~2-day scoreboard window otherwise.
+	}
+}
+
+/** Run the MONDAY Know Her Game publish AT MOST ONCE per week, at ~10:00 UTC Monday — called every tick.
+ *  A cheap weekday+hour check short-circuits all but ~60 ticks/week; a KV week-marker makes it fire once
+ *  (the first tick of Monday hour 10) and skip the rest. Set the marker BEFORE running so an overlapping
+ *  tick can't double-publish. Calls the proxy's /knowher/publish-verified (via the service binding, with
+ *  the publish key); the proxy holds all the logic (stat injection, Lever 1, hold) and diags every outcome,
+ *  so a failure here is safe — the last KHG edition simply stays live. No-op if KNOWHER_INGEST_KEY is unset
+ *  (the pass isn't armed yet) or if no verified candidate is staged (an off/biweekly week → proxy 404). */
+async function maybeRunKnowHerPublishPass(env: Env): Promise<void> {
+	const key = env.KNOWHER_INGEST_KEY;
+	if (!key) return; // not armed yet (owner sets the secret at the supervised-first-run gate)
+	const now = new Date();
+	if (now.getUTCDay() !== KNOWHER_PUBLISH_WEEKDAY_UTC || now.getUTCHours() !== KNOWHER_PUBLISH_HOUR_UTC) return;
+	const weekMarker = `knowher-publish:${now.getUTCFullYear()}-${now.getUTCMonth() + 1}-${now.getUTCDate()}`;
+	if (await env.MATCH_STATE.get(weekMarker)) return; // already ran this Monday
+	await env.MATCH_STATE.put(weekMarker, String(now.getTime()), { expirationTtl: 2 * 86400 });
+	try {
+		const res = await env.PROXY.fetch("https://proxy/knowher/publish-verified", {
+			method: "POST",
+			headers: { "x-ingest-key": key, "Content-Type": "application/json" },
+		});
+		const bodyText = await res.text();
+		// 200 = published (maybe with Lever-1 flags); 404 = no verified candidate (off week — normal); 409 =
+		// held (a player below the floor). All are recorded proxy-side (sdiag); log the status here too so a
+		// `wrangler tail` on the watcher shows the Monday outcome at a glance.
+		console.log(`[watcher] knowher-publish (${weekMarker}): ${res.status} ${bodyText.slice(0, 160)}`);
+	} catch (err) {
+		// Binding/network blip — the last edition stays live; next Monday re-tries. (A same-day retry would
+		// need re-clearing the marker; a missed Monday is acceptable since the content is biweekly anyway.)
+		console.log(`[watcher] knowher-publish threw (${weekMarker}): ${err}`);
 	}
 }
 
