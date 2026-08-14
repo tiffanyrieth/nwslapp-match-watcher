@@ -42,6 +42,25 @@ async function restDelete(cfg: SupabaseConfig, pathAndQuery: string): Promise<vo
 	}
 }
 
+/** INSERT via PostgREST (service-role). `resolution=ignore-duplicates` makes re-inserting an existing PK a
+ *  no-op, so a retried/overlapping wave is idempotent; `return=minimal` asks for no body back. */
+async function restInsert(cfg: SupabaseConfig, table: string, rows: unknown[]): Promise<void> {
+	if (rows.length === 0) return;
+	const res = await fetch(`${cfg.url}/rest/v1/${table}`, {
+		method: "POST",
+		headers: {
+			apikey: cfg.serviceRoleKey,
+			authorization: `Bearer ${cfg.serviceRoleKey}`,
+			"content-type": "application/json",
+			Prefer: "resolution=ignore-duplicates,return=minimal",
+		},
+		body: JSON.stringify(rows),
+	});
+	if (!res.ok) {
+		throw new Error(`Supabase INSERT ${res.status}: ${await res.text()}`);
+	}
+}
+
 const uniq = (xs: string[]): string[] => [...new Set(xs)];
 const inList = (xs: string[]): string => `(${xs.join(",")})`;
 // Quoted variant for string keys that may contain PostgREST-special chars (the national-team
@@ -147,47 +166,104 @@ export async function resolveTokensForEvent(
 	return { tokens: uniq(tokenRows.map((r) => r.token)), teamOptIns: optedInIds.length, prefEligible: eligibleIds.length };
 }
 
-/** Recipients for the post-match "your Predict result is in" push (Change 8). UNLIKE the live-event
- *  fan-out, there is NO team-alert gate — PREDICTING the match is itself the opt-in. Gates:
- *    predict_submission_marks(event_id = eventId)          → who predicted this match
- *    MINUS predict_result_seen(event_id = eventId)         → drop anyone who already viewed their result
- *    notification_preferences(user ∈ set, predict_results) → …who opted into this push
- *    device_tokens(user ∈ eligible)                        → tokens
- *  `predictors` is returned for diagnostics + the caller's "mark done vs retry" decision (0 predictors
- *  ⇒ nobody played; don't burn the KV marker). All service_role reads (RLS-bypassing + explicit grants). */
+// The Predict-results push lands at each fan's LOCAL morning, not a single UTC instant — NWSL is
+// worldwide, so a fixed hour is midnight for someone. Target = 10:00 local (matches the KHG anchor and
+// this push's original "≈10am ET" intent). ⚠️ Keep the target clear of 01:00–03:00 local: DST
+// spring-forward skips that wall-clock hour, so a target inside it would give affected zones ZERO
+// qualifying waves that day. 10:00 is safe.
+export const PREDICT_RESULTS_LOCAL_HOUR = 10;
+// Devices with no stored timezone (an un-migrated app build, or a bad id) fall back to this fixed UTC
+// hour — byte-for-byte the old behaviour, so the rollout is deploy-order-safe and converges as apps update.
+export const LEGACY_PREDICT_HOUR_UTC = 14;
+
+/** True iff a scheduled push for a device in `timezone` should fire in the wave for `now` — i.e. its LOCAL
+ *  hour equals `targetHour`. A missing/blank/garbage tz falls back to the legacy fixed 14:00-UTC send.
+ *  Never throws: a malformed IANA id degrades to the fallback rather than sinking the whole wave. Pure +
+ *  injectable, so it's unit-tested with `node --test` (the watcher's vitest-pool-workers is broken on Node 26). */
+export function qualifiesForLocalMorning(
+	timezone: string | null | undefined,
+	now: Date,
+	targetHour: number = PREDICT_RESULTS_LOCAL_HOUR,
+): boolean {
+	if (!timezone) return now.getUTCHours() === LEGACY_PREDICT_HOUR_UTC;
+	try {
+		// hourCycle "h23" → "00".."23" (avoids en-US's "24" for midnight); parse to a number to compare.
+		const localHour = Number(
+			new Intl.DateTimeFormat("en-US", { timeZone: timezone, hour: "2-digit", hourCycle: "h23" }).format(now),
+		);
+		return localHour === targetHour;
+	} catch {
+		return now.getUTCHours() === LEGACY_PREDICT_HOUR_UTC;
+	}
+}
+
+/** Recipients for the post-match "your Predict result is in" push, for the wave at `now`. UNLIKE the
+ *  live-event fan-out, there is NO team-alert gate — PREDICTING the match is itself the opt-in. Gates:
+ *    predict_submission_marks(event_id = eventId)            → who predicted this match
+ *    MINUS predict_result_seen(event_id = eventId)           → drop anyone who already viewed their result
+ *    MINUS predict_result_notified(event_id = eventId)       → drop anyone we already PUSHED (across-wave dedupe)
+ *    notification_preferences(user ∈ set, predict_results)   → …who opted into this push
+ *    device_tokens(user ∈ eligible), filtered to devices at their LOCAL 10am now → tokens
+ *  `predictors` drives the caller's 0-predictors short-circuit; `userIdsToMark` is who to write to the
+ *  notified ledger after a send. All service_role reads (RLS-bypassing + explicit grants). */
 export async function predictResultRecipients(
 	cfg: SupabaseConfig,
 	eventId: string,
-): Promise<{ tokens: string[]; predictors: number }> {
+	now: Date,
+): Promise<{ tokens: string[]; predictors: number; userIdsToMark: string[] }> {
+	const empty = (predictors: number) => ({ tokens: [], predictors, userIdsToMark: [] });
+
 	const predictorRows = await rest<{ user_id: string }>(
 		cfg,
 		`predict_submission_marks?event_id=eq.${eventId}&select=user_id`,
 	);
 	const predictorIds = uniq(predictorRows.map((r) => r.user_id));
-	if (predictorIds.length === 0) return { tokens: [], predictors: 0 };
+	if (predictorIds.length === 0) return empty(0);
 
-	// Anyone who has already opened their result is dropped — the whole point of the next-day push is
-	// to catch the people who DIDN'T look.
-	const seenRows = await rest<{ user_id: string }>(
-		cfg,
-		`predict_result_seen?event_id=eq.${eventId}&select=user_id`,
-	);
-	const seen = new Set(seenRows.map((r) => r.user_id));
-	const unseenIds = predictorIds.filter((id) => !seen.has(id));
-	if (unseenIds.length === 0) return { tokens: [], predictors: predictorIds.length };
+	// Drop anyone who already opened their result in-app (the push exists to catch people who DIDN'T look)
+	// AND anyone we've already pushed for this fixture. The notified subtraction is what makes the hourly
+	// wave safe: without it a user would be re-pushed at every day's local-10am wave within the window.
+	const [seenRows, notifiedRows] = await Promise.all([
+		rest<{ user_id: string }>(cfg, `predict_result_seen?event_id=eq.${eventId}&select=user_id`),
+		rest<{ user_id: string }>(cfg, `predict_result_notified?event_id=eq.${eventId}&select=user_id`),
+	]);
+	const done = new Set([...seenRows, ...notifiedRows].map((r) => r.user_id));
+	const remainingIds = predictorIds.filter((id) => !done.has(id));
+	if (remainingIds.length === 0) return empty(predictorIds.length);
 
 	const prefRows = await rest<{ user_id: string }>(
 		cfg,
-		`notification_preferences?user_id=in.${inList(unseenIds)}&predict_results=eq.true&select=user_id`,
+		`notification_preferences?user_id=in.${inList(remainingIds)}&predict_results=eq.true&select=user_id`,
 	);
 	const eligibleIds = uniq(prefRows.map((r) => r.user_id));
-	if (eligibleIds.length === 0) return { tokens: [], predictors: predictorIds.length };
+	if (eligibleIds.length === 0) return empty(predictorIds.length);
 
-	const tokenRows = await rest<{ token: string }>(
+	const deviceRows = await rest<{ user_id: string; token: string; timezone: string | null }>(
 		cfg,
-		`device_tokens?user_id=in.${inList(eligibleIds)}&select=token`,
+		`device_tokens?user_id=in.${inList(eligibleIds)}&select=user_id,token,timezone`,
 	);
-	return { tokens: uniq(tokenRows.map((r) => r.token)), predictors: predictorIds.length };
+	// Keep only devices whose LOCAL time is the target morning hour in THIS wave. A user is marked notified
+	// once any of their devices qualifies, so a multi-timezone user gets one push at their earliest 10am.
+	const qualifying = deviceRows.filter((r) => qualifiesForLocalMorning(r.timezone, now));
+	return {
+		tokens: uniq(qualifying.map((r) => r.token)),
+		predictors: predictorIds.length,
+		userIdsToMark: uniq(qualifying.map((r) => r.user_id)),
+	};
+}
+
+/** Mark users as pushed for a fixture — the per-(event,user) idempotency ledger the hourly wave relies on
+ *  to not re-push across days within the scoreboard window. Idempotent (PK + ignore-duplicates). */
+export async function markPredictResultNotified(
+	cfg: SupabaseConfig,
+	eventId: string,
+	userIds: string[],
+): Promise<void> {
+	await restInsert(
+		cfg,
+		"predict_result_notified",
+		uniq(userIds).map((user_id) => ({ event_id: eventId, user_id })),
+	);
 }
 
 /** The NATIONAL-TEAM twin of tokensForEvent: same two gates, but the per-team opt-in comes from

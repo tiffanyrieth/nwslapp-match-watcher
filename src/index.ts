@@ -46,7 +46,7 @@ import {
 // so its cold-start module-eval never touches this cron's per-tick CPU budget — the fix for the
 // "Exceeded CPU Time Limits" errors. This worker only builds card URLs (CARD_PUBLIC_URL) and
 // 302-redirects any /card request that lands here (late-delivered pushes carry the old origin).
-import { activityTokensForMatch, allDeviceTokens, allStartTokens, predictResultRecipients, resolveTokensForEvent, startTokensByCompetitionKey, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activityTokensForMatch, allDeviceTokens, allStartTokens, markPredictResultNotified, predictResultRecipients, resolveTokensForEvent, startTokensByCompetitionKey, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { activeFeeds, buildIndex, CLUB_FEEDS, clubEventLabel, DISCOVERY_INTERVAL_MS, discoveryDue, FEED_LABEL, kickoffMs, liveMissedByIndex, NWSL_FEED, reconcileFeed, type FixtureIndex } from "./fixtures";
 import { buildStartAps, endLiveActivity, liveTopic, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
@@ -171,11 +171,12 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // 75 min gives margin for an early publish. Cron is per-minute → detection fires within ≤60s of the post.
 const LINEUP_LEAD_MS = 75 * 60 * 1000;
 
-// The post-match "your Predict result is in" pass (Change 8) runs once daily at this UTC hour — 14:00
-// ≈ 10am EDT / 9am EST, a calm mid-morning window the day after a match, well clear of the FT alert
-// flood. NOT its own cron (account is at the Workers-free 5-cron cap): it rides the per-minute tick,
-// gated to this hour by a once-per-day KV marker. See `maybeRunPredictResultsPass`.
-const PREDICT_RESULTS_HOUR_UTC = 14;
+// The post-match "your Predict result is in" pass runs as an HOURLY LOCAL-MORNING WAVE: each UTC hour it
+// pushes fans whose device timezone puts them at ~10am local now (NWSL is worldwide — a fixed UTC hour is
+// midnight for someone). Devices with no stored tz fall back to 14:00 UTC (the old behaviour), so rollout
+// is deploy-order-safe. NOT its own cron (account is at the Workers-free 5-cron cap): it rides the
+// per-minute tick, gated to one run per UTC hour by a KV hour-marker. Target hour + fallback live in
+// `qualifiesForLocalMorning` (./supabase). See `maybeRunPredictResultsPass`.
 
 // The MONDAY Know Her Game publish (2026-08-12 weekend/Monday split). The weekend verify gate stages a
 // HUMAN-ONLY pool; this pass calls the proxy's /knowher/publish-verified, which injects FRESH ESPN stats
@@ -423,6 +424,10 @@ export default {
 		// safe by the real gate (use teams they don't follow). See runWatch's readFakeMatch. Secret-gated.
 		if (request.method === "POST" && url.pathname === "/debug/fake-match") {
 			return handleFakeMatch(request, env);
+		}
+
+		if (request.method === "POST" && url.pathname === "/predict-results-run") {
+			return handlePredictResultsRun(request, url, env);
 		}
 
 		return new Response("Not found.", { status: 404 });
@@ -1145,22 +1150,31 @@ async function startNationalActivities(
  *  on `checkUpcomingLineups`: a hand-built payload, KV one-shot dedup, retry-until-sent (don't burn the
  *  marker on a 0-recipient tick, so a late pref-enable within the ~2-day window still lands). Generic copy
  *  (no score) — the push is the hook; the in-app reveal is the payoff. */
-/** Run the daily Predict-results pass AT MOST ONCE per day, at ~14:00 UTC — called every per-minute tick.
- *  A cheap hour check short-circuits all but 60 ticks/day; a KV day-marker makes it fire once (the first
- *  tick of hour 14) and skip the rest. Set the marker BEFORE running so a slow/overlapping tick can't
- *  double-fire; a run failure is harmless — the per-fixture markers + the 2-day scoreboard window mean
- *  tomorrow's pass re-checks anything missed. */
-async function maybeRunPredictResultsPass(env: Env): Promise<void> {
-	const now = new Date();
-	if (now.getUTCHours() !== PREDICT_RESULTS_HOUR_UTC) return;
-	const dayKey = `predict-pass:${now.getUTCFullYear()}-${now.getUTCMonth() + 1}-${now.getUTCDate()}`;
-	if (await env.MATCH_STATE.get(dayKey)) return; // already ran today
-	await env.MATCH_STATE.put(dayKey, String(now.getTime()), { expirationTtl: 2 * 86400 });
-	await runPredictResultsPass(env);
+/** Run the Predict-results pass AT MOST ONCE per UTC HOUR — called every per-minute tick. A KV hour-marker
+ *  makes it fire once per hour (the first tick of the hour) and skip the rest; the ≤5-min window bounds the
+ *  KV reads while tolerating a dropped :00 tick. Set the marker BEFORE running so a slow/overlapping tick
+ *  can't double-fire; a run failure is harmless — the per-user notified ledger + the 2-day scoreboard
+ *  window mean a later wave re-checks anything missed. `now` flows down so the local-morning filter and the
+ *  dry-run route share one clock. */
+async function maybeRunPredictResultsPass(env: Env, at?: Date): Promise<void> {
+	const now = at ?? new Date();
+	if (now.getUTCMinutes() >= 5) return; // one wave per UTC hour; first-5-min window survives a dropped :00 tick
+	const hourKey = `predict-pass:${now.getUTCFullYear()}-${now.getUTCMonth() + 1}-${now.getUTCDate()}-${now.getUTCHours()}`;
+	if (await env.MATCH_STATE.get(hourKey)) return; // already ran this UTC hour
+	await env.MATCH_STATE.put(hourKey, String(now.getTime()), { expirationTtl: 2 * 3600 });
+	await runPredictResultsPass(env, now);
 }
 
-async function runPredictResultsPass(env: Env): Promise<void> {
+/** One local-morning wave. `dryRun` runs the full funnel + tz filter and RETURNS what it would send, but
+ *  skips the enqueue + the notified-ledger write — the owner's supervised-verify path (mirrors KHG's
+ *  publish-verified?dryRun=1). */
+async function runPredictResultsPass(
+	env: Env,
+	now: Date,
+	dryRun = false,
+): Promise<Array<{ home: string; away: string; predictors: number; qualifyingTokens: number; userIdsWouldMark: string[] }>> {
 	const sb = supabaseConfig(env);
+	const report: Array<{ home: string; away: string; predictors: number; qualifyingTokens: number; userIdsWouldMark: string[] }> = [];
 	let events: ScoreboardEvent[];
 	try {
 		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500`, {
@@ -1168,27 +1182,39 @@ async function runPredictResultsPass(env: Env): Promise<void> {
 		});
 		if (!res.ok) {
 			console.log(`[watcher] predict-results scoreboard fetch failed: ${res.status}`);
-			return;
+			return report;
 		}
 		events = ((await res.json()) as { events?: ScoreboardEvent[] }).events ?? [];
 	} catch (err) {
 		console.log(`[watcher] predict-results scoreboard threw: ${err}`);
-		return;
+		return report;
 	}
 
 	for (const event of events) {
 		const match = parseMatch(event);
 		if (!match || match.state !== "post" || match.unfinishedPost) continue; // settled finals only
 		const eventId = match.eventId;
-		const dedupeKey = `predict-result:${eventId}`;
-		if (await env.MATCH_STATE.get(dedupeKey)) continue; // one-shot per fixture — already sent
+		// Cheap short-circuit: a fixture nobody predicted never gains predictors after settling, so once we
+		// see 0 predictors we skip it for the rest of its window instead of re-funnelling it every wave.
+		if (!dryRun && (await env.MATCH_STATE.get(`predict-nopredictors:${eventId}`))) continue;
 
-		let recipients: { tokens: string[]; predictors: number };
+		let recipients: { tokens: string[]; predictors: number; userIdsToMark: string[] };
 		try {
-			recipients = await predictResultRecipients(sb, eventId);
+			recipients = await predictResultRecipients(sb, eventId, now);
 		} catch (err) {
-			// Don't mark KV — a transient Supabase read retries on the next daily pass (within the window).
+			// Don't mark anything — a transient Supabase read retries on a later wave (within the window).
 			console.log(`[watcher] predict-results lookup failed (${eventId}): ${err}`);
+			continue;
+		}
+
+		if (dryRun) {
+			report.push({ home: match.home.abbr, away: match.away.abbr, predictors: recipients.predictors, qualifyingTokens: recipients.tokens.length, userIdsWouldMark: recipients.userIdsToMark });
+			continue;
+		}
+
+		if (recipients.predictors === 0) {
+			// Nobody predicted this match — mark so we don't re-scan it every wave it's in the window.
+			await env.MATCH_STATE.put(`predict-nopredictors:${eventId}`, String(Date.now()), { expirationTtl: 2 * 86400 });
 			continue;
 		}
 
@@ -1207,19 +1233,43 @@ async function runPredictResultsPass(env: Env): Promise<void> {
 				recipients.tokens,
 			);
 			await enqueueFanout(env.PUSH_QUEUE, messages);
-			await env.MATCH_STATE.put(dedupeKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
+			// Mark these users notified so later waves (and later days within the window) don't re-push them.
+			// Per-(event,user) idempotency; the local-hour gate handles same-day at-most-once.
+			await markPredictResultNotified(sb, eventId, recipients.userIdsToMark);
 			console.log(
 				`[watcher] predict-results ${match.home.abbr} vs ${match.away.abbr}: ` +
 					`${recipients.tokens.length} token(s) → ${messages.length} msg(s)`,
 			);
-		} else if (recipients.predictors === 0) {
-			// Nobody predicted this match — mark done so we don't re-scan it every day it's in the window.
-			await env.MATCH_STATE.put(dedupeKey, String(Date.now()), { expirationTtl: MATCH_STATE_TTL });
 		}
-		// predictors > 0 but 0 tokens (all viewed OR pref off): DON'T mark — retry next day within the
-		// window so a late pref-enable / a not-yet-viewed user still gets one push. Bounded by the marker
-		// once anyone is reached, and by the ~2-day scoreboard window otherwise.
+		// predictors > 0 but 0 tokens (nobody at their local 10am this wave, or all seen/notified/pref-off):
+		// do nothing — a future wave catches users whose local 10am hasn't come yet, bounded by the notified
+		// ledger + the ~2-day scoreboard window.
 	}
+	return report;
+}
+
+/** POST /predict-results-run?dryRun=1&atHourUTC=<0-23> — supervised verify for the localized Predict-
+ *  results wave. Secret-gated. `dryRun=1` returns the per-fixture cohort (tokens/users it WOULD push) with
+ *  NO send + NO ledger write; `atHourUTC` overrides the wave's clock so the owner can simulate any
+ *  timezone's 10am wave without waiting for the live tick (e.g. atHourUTC=0 = Sydney's wave). Without
+ *  dryRun it runs a REAL wave at the given time — use dryRun for verification. */
+async function handlePredictResultsRun(request: Request, url: URL, env: Env): Promise<Response> {
+	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
+		return new Response("forbidden", { status: 403 });
+	}
+	const j = (body: unknown, status = 200) =>
+		new Response(JSON.stringify(body, null, 2), { status, headers: { "Content-Type": "application/json" } });
+
+	const now = new Date();
+	const atHour = url.searchParams.get("atHourUTC");
+	if (atHour !== null) {
+		const h = Number(atHour);
+		if (!Number.isInteger(h) || h < 0 || h > 23) return j({ error: "atHourUTC must be an integer 0–23" }, 400);
+		now.setUTCHours(h, 0, 0, 0);
+	}
+	const dryRun = url.searchParams.get("dryRun") === "1";
+	const fixtures = await runPredictResultsPass(env, now, dryRun);
+	return j({ atUTC: now.toISOString(), dryRun, fixtures });
 }
 
 /** Run the MONDAY Know Her Game publish AT MOST ONCE per week, at ~10:00 UTC Monday — called every tick.
