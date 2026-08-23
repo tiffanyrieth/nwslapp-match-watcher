@@ -925,6 +925,12 @@ interface FakeMatchSpec {
 	/** Source feed the synthetic fixture pretends to come from (default NWSL) — lets a fake CUP
 	 *  match exercise the competition-label path organically ("Challenge Cup" on the device card). */
 	feed?: string;
+	/** Seconds ADDED to the real elapsed (now − kickoffMs) so a scenario can OPEN mid-match — e.g. 83'
+	 *  — while the LA-start still fires organically off a near-future `kickoffMs`. The ONLY way to compress
+	 *  a late-game / stoppage test without waiting 90 real minutes. Default 0 = normal from-kickoff.
+	 *  Once elapsed crosses 45', readFakeMatch reports period 2 so the REAL stoppageLabel (livestate.ts,
+	 *  cap 90 for the 2nd half) emits "90'+n'" as wall-clock carries the anchor past 90'. */
+	clockOffsetSec?: number;
 }
 async function readFakeMatch(env: Env): Promise<{ event: ScoreboardEvent; feed: string } | null> {
 	const spec = (await env.MATCH_STATE.get("debug:fake-match", "json")) as FakeMatchSpec | null;
@@ -934,8 +940,15 @@ async function readFakeMatch(env: Env): Promise<{ event: ScoreboardEvent; feed: 
 	if (now >= spec.ftMs) {
 		state = "post"; name = "STATUS_FULL_TIME"; period = 2;
 	} else if (now >= spec.kickoffMs) {
-		state = "in"; name = "STATUS_FIRST_HALF"; period = 1;
-		clock = Math.floor((now - spec.kickoffMs) / 1000); // seconds elapsed
+		state = "in";
+		// Elapsed match seconds (+ optional clockOffsetSec so a scenario can OPEN mid-match — see the
+		// FakeMatchSpec doc). Default offset 0 → plain from-kickoff, unchanged for the default script.
+		clock = Math.floor((now - spec.kickoffMs) / 1000) + (spec.clockOffsetSec ?? 0);
+		// Period/name from the elapsed minute so the REAL clock path treats a late scenario as the 2nd
+		// half: contentStateFromMatch's stoppageLabel uses cap=90 for period 2 and emits "90'+n'" once the
+		// monotonic anchor carries elapsed past 90'. The default script stays under 45' → 1st half.
+		if (clock >= 45 * 60) { period = 2; name = "STATUS_SECOND_HALF"; }
+		else { period = 1; name = "STATUS_FIRST_HALF"; }
 	}
 	// Build the scoreboard `details` (scoring plays + red cards) + running score AS OF `now` from the
 	// timeline. A goal with `disallowedAt` in the past is REMOVED (score decrements + its play drops) → a
@@ -983,7 +996,7 @@ async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 	if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) {
 		return new Response("forbidden", { status: 403 });
 	}
-	let p: { gapSec?: number; homeId?: string; homeAbbr?: string; awayId?: string; awayAbbr?: string; feed?: string; clear?: boolean } = {};
+	let p: { gapSec?: number; homeId?: string; homeAbbr?: string; awayId?: string; awayAbbr?: string; feed?: string; clear?: boolean; scenario?: string; scorer?: string } = {};
 	try {
 		p = (await request.json()) as typeof p;
 	} catch {
@@ -1002,8 +1015,46 @@ async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 		await env.MATCH_STATE.delete("debug:fake-match");
 		return j({ cleared: true });
 	}
-	const gap = (p.gapSec ?? 90) * 1000;
 	const now = Date.now();
+
+	// ── "late-drama": a COMPRESSED late-game test through the ORGANIC path ────────────────────────
+	// LA-start fires now (kickoff 2m out → the pre card + the watch crest render — the headline check),
+	// the match OPENS at 83' (clockOffsetSec), a HOME goal lands at 85', then the clock self-ticks past
+	// the hour into real stoppage (period 2 → livestate stoppageLabel "90'+n'") and FT at 90'+5'. ~12 min
+	// wall-clock. Defaults WAS 1–0 ORL (owner's "the way it should have been"). The real detectEvents /
+	// syncLiveActivity / broadcast path drives every push — NOT the inline /test-activity send.
+	if (p.scenario === "late-drama") {
+		const homeId = p.homeId ?? "15365", homeAbbr = p.homeAbbr ?? "WAS";
+		const awayId = p.awayId ?? "18206", awayAbbr = p.awayAbbr ?? "ORL";
+		const kickoffMs = now + 2 * 60_000;
+		const clockOffsetSec = 83 * 60;           // clock opens at 83:00 when state flips to "in"
+		const goalAt = kickoffMs + 2 * 60_000;    // ~2 min after kickoff → clock ~85'
+		const ftMs = kickoffMs + 12 * 60_000;     // elapsed at FT = 83' + 12' = 95' = 90'+5'
+		const scorer = p.scorer ?? "T. Rodman";
+		const spec: FakeMatchSpec = {
+			id: `fakematch-${now}`, homeId, homeAbbr, awayId, awayAbbr,
+			kickoffMs, ftMs, clockOffsetSec,
+			goals: [{ at: goalAt, side: "home", scorer, minute: 85 }],
+			reds: [],
+			...(p.feed ? { feed: p.feed } : {}),
+		};
+		await env.MATCH_STATE.put("debug:fake-match", JSON.stringify(spec), { expirationTtl: Math.ceil((ftMs - now) / 1000) + 600 });
+		const rel = (ms: number) => `+${Math.round((ms - now) / 60_000)}m`;
+		return j({
+			scheduled: { id: spec.id, teams: `${homeAbbr} v ${awayAbbr}`, scenario: "late-drama" },
+			timeline: [
+				`LA-start ~now (pre card + buzz) — ⌚ CHECK THE CREST on the watch here`,
+				`kickoff ${rel(kickoffMs)} (clock opens ~83')`,
+				`${homeAbbr} goal ${scorer} 85' ${rel(goalAt)} → ${homeAbbr} 1–0`,
+				`clock self-ticks 85'→90' (mm:ss past the hour)`,
+				`stoppage 90'+1'…+5' ${rel(kickoffMs + 7 * 60_000)}–${rel(ftMs)}`,
+				`FT ${rel(ftMs)} (final ${homeAbbr} 1–0 ${awayAbbr})`,
+			],
+			note: `Needs a build-37 TestFlight install with alerts ON for ${homeAbbr} + Live Activities ON + app opened once (fresh start token). Watch for: crest render on the ⌚, the goal buzz, the >60' clock, the "90'+n'" stoppage label, FT ${homeAbbr} 1–0.`,
+		});
+	}
+
+	const gap = (p.gapSec ?? 90) * 1000;
 	const kickoffMs = now + 2 * 60_000; // kickoff 2 min out (LA-start fires now, inside the 20-min window)
 	const cm = (t: number) => Math.max(1, Math.round((t - kickoffMs) / 60_000)); // cosmetic match-clock minute
 	const goals: FakeGoal[] = [];
