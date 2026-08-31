@@ -166,6 +166,103 @@ export async function resolveTokensForEvent(
 	return { tokens: uniq(tokenRows.map((r) => r.token)), teamOptIns: optedInIds.length, prefEligible: eligibleIds.length };
 }
 
+/** One detected event's fan-out request for the BATCHED club lookup. `id` is the caller's unique tag
+ *  (e.g. `${eventId}:${type}`) used to read the tokens back out of the returned map. */
+export interface EventTokenRequest {
+	id: string;
+	teamIds: string[];
+	prefColumn: PrefColumn;
+}
+
+/** BATCHED club per-event V1 fan-out: exactly 3 external REST calls per DISTINCT pref column per tick,
+ *  regardless of how many matches fire that event type together — replacing the old per-event
+ *  `tokensForEvent` (3 REST × E events), whose unbatched shape breaches the 50-external subrequest
+ *  budget on an 8-match Decision-Day kickoff/HT cluster (docs/stress-testing.md §7, subrequest row).
+ *  Mirrors startTokensByCompetitionKey; the pure partition tail (partitionEventTokens) is node-tested.
+ *  Returns each request's `id` → its uniq'd device tokens — SEMANTICALLY IDENTICAL to calling
+ *  resolveTokensForEvent per event (either-team OR, then the pref + token gates). */
+export async function resolveTokensBatch(
+	cfg: SupabaseConfig,
+	requests: EventTokenRequest[],
+): Promise<Map<string, string[]>> {
+	const out = new Map<string, string[]>();
+	if (requests.length === 0) return out;
+	// One 3-REST batch per distinct pref column (each column needs its own notification_preferences gate);
+	// ≤5 columns ⇒ ≤15 REST worst case vs 3×E unbatched.
+	const byPref = new Map<PrefColumn, EventTokenRequest[]>();
+	for (const r of requests) {
+		if (!PREF_COLUMNS.includes(r.prefColumn)) throw new Error(`Unknown pref column: ${r.prefColumn}`);
+		const g = byPref.get(r.prefColumn);
+		if (g) g.push(r);
+		else byPref.set(r.prefColumn, [r]);
+	}
+	for (const [prefColumn, group] of byPref) {
+		const teamIds = uniq(group.flatMap((r) => r.teamIds));
+		if (teamIds.length === 0) {
+			for (const r of group) out.set(r.id, []);
+			continue;
+		}
+		const alertRows = await rest<{ user_id: string; team_id: string }>(
+			cfg,
+			`team_alert_preferences?team_id=in.${inList(teamIds)}&alerts_enabled=eq.true&select=user_id,team_id`,
+		);
+		const optedIds = uniq(alertRows.map((r) => r.user_id));
+		if (optedIds.length === 0) {
+			for (const r of group) out.set(r.id, []);
+			continue;
+		}
+		const prefRows = await rest<{ user_id: string }>(
+			cfg,
+			`notification_preferences?user_id=in.${inList(optedIds)}&${prefColumn}=eq.true&select=user_id`,
+		);
+		const eligibleIds = uniq(prefRows.map((r) => r.user_id));
+		if (eligibleIds.length === 0) {
+			for (const r of group) out.set(r.id, []);
+			continue;
+		}
+		const tokenRows = await rest<{ user_id: string; token: string }>(
+			cfg,
+			`device_tokens?user_id=in.${inList(eligibleIds)}&select=user_id,token`,
+		);
+		partitionEventTokens(group, alertRows, eligibleIds, tokenRows, out);
+	}
+	return out;
+}
+
+/** Pure partition tail of resolveTokensBatch (split out for node --test): for each request, the uniq'd
+ *  device tokens of ELIGIBLE users (pref column ON) who opted into ANY of its teamIds. A user following
+ *  both teams of a match is counted once (Set). Mutates + returns `out`. */
+export function partitionEventTokens(
+	requests: EventTokenRequest[],
+	alertRows: Array<{ user_id: string; team_id: string }>,
+	eligibleIds: string[],
+	tokenRows: Array<{ user_id: string; token: string }>,
+	out: Map<string, string[]> = new Map(),
+): Map<string, string[]> {
+	const eligible = new Set(eligibleIds);
+	const tokensByUser = new Map<string, string[]>();
+	for (const t of tokenRows) {
+		const arr = tokensByUser.get(t.user_id);
+		if (arr) arr.push(t.token);
+		else tokensByUser.set(t.user_id, [t.token]);
+	}
+	const usersByTeam = new Map<string, Set<string>>();
+	for (const a of alertRows) {
+		if (!eligible.has(a.user_id)) continue;
+		const s = usersByTeam.get(a.team_id);
+		if (s) s.add(a.user_id);
+		else usersByTeam.set(a.team_id, new Set([a.user_id]));
+	}
+	for (const req of requests) {
+		const users = new Set<string>();
+		for (const tid of req.teamIds) for (const u of usersByTeam.get(tid) ?? []) users.add(u);
+		const toks: string[] = [];
+		for (const u of users) for (const t of tokensByUser.get(u) ?? []) toks.push(t);
+		out.set(req.id, uniq(toks));
+	}
+	return out;
+}
+
 // The Predict-results push lands at each fan's LOCAL morning, not a single UTC instant — NWSL is
 // worldwide, so a fixed hour is midnight for someone. Target = 10:00 local (matches the KHG anchor and
 // this push's original "≈10am ET" intent). ⚠️ Keep the target clear of 01:00–03:00 local: DST
