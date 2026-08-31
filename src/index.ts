@@ -46,7 +46,7 @@ import {
 // so its cold-start module-eval never touches this cron's per-tick CPU budget — the fix for the
 // "Exceeded CPU Time Limits" errors. This worker only builds card URLs (CARD_PUBLIC_URL) and
 // 302-redirects any /card request that lands here (late-delivered pushes carry the old origin).
-import { activityTokensForMatch, allDeviceTokens, allStartTokens, markPredictResultNotified, predictResultRecipients, resolveTokensForEvent, startTokensByCompetitionKey, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activityTokensForMatch, allDeviceTokens, allStartTokens, markPredictResultNotified, predictResultRecipients, resolveTokensBatch, resolveTokensForEvent, startTokensByCompetitionKey, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { activeFeeds, buildIndex, CLUB_FEEDS, clubEventLabel, DISCOVERY_INTERVAL_MS, discoveryDue, FEED_LABEL, kickoffMs, liveMissedByIndex, NWSL_FEED, reconcileFeed, type FixtureIndex } from "./fixtures";
 import { buildStartAps, endLiveActivity, liveTopic, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
@@ -245,6 +245,31 @@ async function enqueueV1(env: Env, ev: MatchEvent, tokens: string[]): Promise<nu
 	await enqueueFanout(env.PUSH_QUEUE, messages);
 	console.log(`[watcher] enqueued ${ev.type} "${ev.title}": ${tokens.length} token(s) → ${messages.length} msg(s)`);
 	return messages.length;
+}
+
+/** Flush the tick's collected club V1 events with ONE batched follower lookup (3 REST per distinct pref
+ *  column) instead of 3 REST per event — the fix for the 50-external subrequest breach on an 8-match
+ *  Decision-Day kickoff/HT cluster (docs/stress-testing.md §7). Falls back to per-event lookups if the
+ *  batch query throws, so a transient Supabase blip degrades gracefully instead of dropping a whole
+ *  cluster's pushes. Enqueue only (no APNs here) → never touches the subrequest cap regardless of audience. */
+async function flushClubV1(env: Env, sb: SupabaseConfig, pending: MatchEvent[]): Promise<void> {
+	if (pending.length === 0) return;
+	const tag = (ev: MatchEvent) => `${ev.eventId}:${ev.type}`;
+	let tokenMap: Map<string, string[]>;
+	try {
+		tokenMap = await resolveTokensBatch(sb, pending.map((ev) => ({ id: tag(ev), teamIds: ev.teamIds, prefColumn: ev.prefColumn })));
+	} catch (err) {
+		console.log(`[watcher] batched follower lookup failed — per-event fallback: ${err}`);
+		tokenMap = new Map();
+		for (const ev of pending) {
+			try {
+				tokenMap.set(tag(ev), await tokensForEvent(sb, ev.teamIds, ev.prefColumn));
+			} catch (e) {
+				console.log(`[watcher] per-event fallback failed (${ev.type} ${ev.eventId}): ${e}`);
+			}
+		}
+	}
+	for (const ev of pending) await enqueueV1(env, ev, tokenMap.get(tag(ev)) ?? []);
 }
 
 /** Producer: chunk push-to-start tokens into fan-out messages and enqueue. The start push is the ONE
@@ -628,6 +653,11 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	const sb = supabaseConfig(env);
 	const apns = apnsConfig(env);
 
+	// Collect club V1 events across ALL matches this tick, then do ONE batched follower lookup after the
+	// loop (flushClubV1) — an inline per-event lookup (3 REST each) breaches the 50-external subrequest cap
+	// on a Decision-Day kickoff/HT cluster. Same collect-then-batch shape the NT LA-start pass uses below.
+	const pendingV1: MatchEvent[] = [];
+
 	for (const event of events) {
 		// Live-window gate (cheap, no I/O) before any KV read.
 		const ko = kickoffMs(event);
@@ -662,7 +692,7 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 			await enqueueV1(env, ev, tokens);
 		};
 
-		for (const ev of detected) await fireV1(ev);
+		for (const ev of detected) pendingV1.push(ev);
 
 		// VAR correction: a score decrease during an in-progress match. NOT fired immediately — first
 		// debounce against a transient ESPN glitch (stale/cached payload, momentary zeros) by waiting,
@@ -722,6 +752,10 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 			});
 		}
 	}
+
+	// One batched follower lookup for every club V1 event detected across the loop above (see flushClubV1) —
+	// keeps the tick's external-subrequest count flat regardless of how many matches fire together.
+	await flushClubV1(env, sb, pendingV1);
 
 	// NATIONAL-TEAM pass: the same event detection (kickoff/goal/HT/FT), but fanned out by FIFA code to
 	// `competition_alert_preferences` instead of the club table. V1 push only — NT Live Activities (V2)
@@ -893,6 +927,8 @@ async function syncLiveActivity(
 	// "90'+1'"→"+2'"… each minute — the only way the widget's static +N advances is a fresh broadcast,
 	// so resync whenever the label changes (entering, each minute, and leaving stoppage). Bounded: a
 	// handful of pushes per stoppage window, one broadcast reaching all subscribers.
+	// device-proven: this per-minute stoppage-cadence broadcast has run correctly in production for ~6
+	// weeks (owner, 2026-08-31) — the widget's static +N advances live on real devices as expected.
 	const stoppage = state.stoppageDisplay ?? "";
 	if (!resync && (prev?.stop ?? "") !== stoppage) resync = true;
 	// 10-min floor: re-broadcast even during smooth play so the widget can't coast too far behind.
