@@ -85,10 +85,13 @@ function lastScorer(m: Match): string | undefined {
 	return undefined;
 }
 
-/** Cap for per-side scorer lists in content-state — keeps the APNs 4KB envelope safe and the
- *  lock-screen card bounded. NWSL sides rarely exceed 4 goals; when one does, the 4th line
- *  becomes an overflow marker ("+2 more"). */
-const SCORERS_PER_SIDE_CAP = 4;
+/** Cap for per-side scorer lists in content-state. Raised 4 → 7 (2026-08-31) so a high-scoring side
+ *  (DEN 6-1, BOS 2-5) shows its scorers instead of collapsing early into "+N more". Payload is NOT the
+ *  constraint — 7/side is ~120 bytes over 4, the whole push stays well under the APNs 4KB envelope; the
+ *  real limit is the iOS lock-screen card HEIGHT, which clips beyond its ceiling. The overflow marker is
+ *  retained deliberately as the graceful fallback if iOS clips before 7. Beyond the cap the last line
+ *  becomes "+N more". */
+const SCORERS_PER_SIDE_CAP = 7;
 
 /** One side's scorer lines ("C. Hutton 5'"), chronological, capped. Unattributed goals (ESPN
  *  gave no scorer) are skipped — never fabricated. Undefined when empty (compact() omits). */
