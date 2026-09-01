@@ -26,7 +26,7 @@ export interface LiveContentState {
 	staticLabel?: string; // "3:00 PM" | "HT" | "FT" — shown when not ticking
 	lastScorer?: string; // legacy single line — kept so pre-scorer-columns builds keep rendering
 	broadcast?: string;
-	/** Per-side scorer lines ("C. Hutton 5'"), chronological, capped at 4 (+N overflow marker) —
+	/** Per-side scorer lines ("C. Hutton 5'"), chronological, capped at 7 (+N overflow marker) —
 	 *  the widget renders these under each team, FIFA/Reddit-match-thread style. Omitted at 0-0. */
 	homeScorers?: string[];
 	awayScorers?: string[];
