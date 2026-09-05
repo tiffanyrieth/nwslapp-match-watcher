@@ -1154,7 +1154,7 @@ async function startUpcomingActivities(
 		}
 		if (tokens.length === 0) continue; // no opt-ins yet — retry next poll, still inside the window
 		const attrs = attributesFor(info.matchId, info.homeAbbr, info.awayAbbr, labelFor(event));
-		const state = preContentState(kickoffLabel(ko));
+		const state = preContentState(kickoffLabel(ko), info.broadcast);
 		// ARRIVAL-BUZZ LAW (corrected 2026-07-09 against the 7/5 A/B logs — see docs/live-activity-v2.md §3):
 		// TWO INDEPENDENT requirements — proven separately 7/11, do NOT conflate them (this is what
 		// wasted days): (1) RENDER needs both an `alert` object [render law, 7/4] AND a correct `{ aps }`
@@ -1217,7 +1217,7 @@ async function startNationalActivities(
 		const tokens = [...new Set([...(tokensByKey.get(`nt:${p.info.homeAbbr}`) ?? []), ...(tokensByKey.get(`nt:${p.info.awayAbbr}`) ?? [])])];
 		if (tokens.length === 0) continue; // no opt-ins for this match — retry next poll, still inside the window
 		const attrs = attributesFor(p.info.matchId, p.info.homeAbbr, p.info.awayAbbr, p.label, true);
-		const state = preContentState(kickoffLabel(p.ko));
+		const state = preContentState(kickoffLabel(p.ko), p.info.broadcast);
 		// Buzz-once arrival, then silent (see the club start above + docs/live-activity-v2.md §3).
 		const startAlert = {
 			title: `${p.info.homeAbbr} vs ${p.info.awayAbbr}`,

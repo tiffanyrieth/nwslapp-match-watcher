@@ -155,6 +155,9 @@ export function contentStateFromMatch(m: Match, virtualKickoff?: number): LiveCo
 		homeRedCards: sideReds(m, m.home.id),
 		awayRedCards: sideReds(m, m.away.id),
 		stoppageDisplay,
+		// Broadcast/TV on the live card's footer (dropped on a tall ≥6-scorer card, widget-side). parseMatch
+		// pulled it from the event's broadcasts[].names; nil (a mid-match blank) → the footer just omits it.
+		broadcast: m.broadcast,
 	};
 }
 
@@ -187,6 +190,9 @@ export interface UpcomingInfo {
 	awayAbbr: string;
 	homeId: string;
 	awayId: string;
+	/** Broadcast/TV name from the scheduled event (e.g. "Paramount+") — shown on the pre-start card so a
+	 *  fan sees WHERE to watch 20 min out, not just WHO. Same extraction parseMatch uses for the live card. */
+	broadcast?: string;
 }
 export function upcomingInfo(event: ScoreboardEvent): UpcomingInfo | null {
 	const comp = event.competitions?.[0];
@@ -201,10 +207,12 @@ export function upcomingInfo(event: ScoreboardEvent): UpcomingInfo | null {
 		awayAbbr: away.team.abbreviation,
 		homeId: home.team.id,
 		awayId: away.team.id,
+		broadcast: comp?.broadcasts?.find((b) => b.names?.length)?.names?.[0] || undefined,
 	};
 }
 
-/** Pre-match content-state (no score yet) — shows the scheduled kickoff time. */
-export function preContentState(kickoffLabel: string): LiveContentState {
-	return { homeScore: 0, awayScore: 0, phase: "pre", staticLabel: kickoffLabel };
+/** Pre-match content-state (no score yet) — shows the scheduled kickoff time + broadcast/TV (the widget
+ *  renders `broadcast` on the footer's right when present; nil → nothing there). */
+export function preContentState(kickoffLabel: string, broadcast?: string): LiveContentState {
+	return { homeScore: 0, awayScore: 0, phase: "pre", staticLabel: kickoffLabel, broadcast };
 }
