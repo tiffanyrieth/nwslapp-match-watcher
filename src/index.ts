@@ -168,6 +168,37 @@ const CORRECTION_DEBOUNCE_MS = 12_000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** Run `fn` over `items` with at most `limit` promises in flight — bounded concurrency, results in
+ *  input order. The live-match loop uses this so a full slate's per-match I/O (KV read + /summary
+ *  cross-check + Live Activity broadcast) runs IN PARALLEL: the tick's wall time is then ~the slowest
+ *  single match, not the SUM over matches. That's what keeps a 6–7 game slate under Cloudflare's ~30s
+ *  per-invocation ceiling — the old sequential `for…await` grew linearly with the live-match count and
+ *  was tipping live ticks into `exceededCpu` kills on multi-game days. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+	const results = new Array<R>(items.length);
+	let next = 0;
+	const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+		while (next < items.length) {
+			const i = next++;
+			results[i] = await fn(items[i]);
+		}
+	});
+	await Promise.all(runners);
+	return results;
+}
+
+// Live-match loop concurrency. A full NWSL slate is 6–7 simultaneous matches; 8 covers it with margin,
+// and each match's subrequests are INTERNAL (service binding to the proxy + APNs), so parallelism here is
+// cheap and nowhere near the subrequest budget. Follower lookups stay batched after the loop (flushClubV1).
+const MATCH_CONCURRENCY = 8;
+
+// Second-poll timing budget (see the `scheduled` double-poll). A live tick must finish under Cloudflare's
+// ~30s per-invocation ceiling; the in-tick gap before the 2nd poll is CLAMPED (not a fixed 30s sleep) so
+// poll1 + gap + poll2 stays under TICK_BUDGET_MS no matter how long poll1 took.
+const TICK_BUDGET_MS = 26_000; // whole-tick ceiling we hold ourselves to, safely under the ~30s platform limit
+const SECOND_POLL_GAP_MS = 20_000; // normal-case gap before the 2nd poll (was a fixed 30_000 sleep)
+const SECOND_POLL_RESERVE_MS = 4_000; // headroom reserved for poll 2 + the daily/KHG/heartbeat passes
+
 // "Lineups posted" push: start polling /summary this far before kickoff. ESPN posts the XI ~1h out;
 // 75 min gives margin for an early publish. Cron is per-minute → detection fires within ≤60s of the post.
 const LINEUP_LEAD_MS = 75 * 60 * 1000;
@@ -369,9 +400,18 @@ export default {
 	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
 		ctx.waitUntil(
 			(async () => {
+				const tickStart = Date.now();
 				const live = await runWatch(env); // first poll — rides the shared 30s edge cache
 				if (live) {
-					await sleep(30_000);
+					// Second poll → ~sub-minute goal/HT/FT latency without a sub-minute cron (CF's floor is
+					// 60s). The in-tick gap is BUDGETED, not a fixed 30s sleep: a live tick must finish well
+					// under Cloudflare's ~30s per-invocation ceiling, and a fixed 30s left ~zero headroom, so
+					// live ticks were tipping into exceededCpu kills on multi-game days. Clamp the gap so
+					// poll1 + gap + poll2 stays under TICK_BUDGET_MS regardless of how long poll1 ran, capped
+					// at SECOND_POLL_GAP_MS for the normal fast case (the match loop is now concurrent, so
+					// poll1 is fast and flat in the match count — see runWatch / mapLimit).
+					const gap = Math.min(SECOND_POLL_GAP_MS, TICK_BUDGET_MS - (Date.now() - tickStart) - SECOND_POLL_RESERVE_MS);
+					if (gap > 0) await sleep(gap);
 					await runWatch(env, true); // second poll — cache-busted for a fresh ESPN read
 				}
 				// The once-daily Predict-results pass (Change 8) rides THIS per-minute tick (the account is
@@ -659,13 +699,18 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	// on a Decision-Day kickoff/HT cluster. Same collect-then-batch shape the NT LA-start pass uses below.
 	const pendingV1: MatchEvent[] = [];
 
-	for (const event of events) {
+	// Process the live matches CONCURRENTLY (was a sequential for…await). Each match is independent — its
+	// own `match:<id>` KV key and LA channel — so running them in parallel is safe and makes the tick's
+	// wall time ~the slowest single match instead of the SUM. That's what holds a full 6–7 game slate
+	// under the ~30s per-invocation ceiling. Detected events are RETURNED and collected for the one
+	// batched follower lookup below (flushClubV1), so concurrency never changes what fires or its order.
+	const processClubMatch = async (event: ScoreboardEvent): Promise<MatchEvent[]> => {
 		// Live-window gate (cheap, no I/O) before any KV read.
 		const ko = kickoffMs(event);
-		if (ko === null || now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) continue;
+		if (ko === null || now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) return [];
 
 		const match = parseMatch(event); // null unless "in" or "post" with both team ids
-		if (!match) continue;
+		if (!match) return [];
 		// Competition label (from the source feed) — read only by the kickoff subtitle, so a cup
 		// kickoff push says which competition it is. parseMatch can't know the feed; set it here.
 		match.competition = labelFor(event);
@@ -675,7 +720,7 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 
 		// A "post" match we were never tracking (no prior live state) → already
 		// finished before we started; skip so we don't fire a late full-time.
-		if (match.state === "post" && !prev) continue;
+		if (match.state === "post" && !prev) return [];
 
 		// SUMMARY GOAL CROSS-CHECK (2026-09-05). ESPN's /scoreboard competitor score can TRAIL its own
 		// /summary keyEvents for a goal, which delayed the goal push + V2-LA while the app's play-by-play
@@ -720,8 +765,6 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 			}
 			await enqueueV1(env, ev, tokens);
 		};
-
-		for (const ev of detected) pendingV1.push(ev);
 
 		// VAR correction: a score decrease during an in-progress match. NOT fired immediately — first
 		// debounce against a transient ESPN glitch (stale/cached payload, momentary zeros) by waiting,
@@ -780,7 +823,14 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 				expirationTtl: MATCH_STATE_TTL,
 			});
 		}
-	}
+
+		return detected;
+	};
+
+	// Fan the matches out with bounded concurrency, then collect every detected event for the ONE batched
+	// follower lookup below. Order-independent: concurrency changes only the WALL TIME, not what fires.
+	const detectedPerMatch = await mapLimit(events, MATCH_CONCURRENCY, processClubMatch);
+	for (const list of detectedPerMatch) for (const ev of list) pendingV1.push(ev);
 
 	// One batched follower lookup for every club V1 event detected across the loop above (see flushClubV1) —
 	// keeps the tick's external-subrequest count flat regardless of how many matches fire together.
