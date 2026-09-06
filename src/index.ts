@@ -33,6 +33,7 @@ import {
 	nextState,
 	parseMatch,
 	sameStoredState,
+	summaryGoalScore,
 	toPayload,
 	toPredictResultPayload,
 	type Match,
@@ -675,6 +676,34 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 		// A "post" match we were never tracking (no prior live state) → already
 		// finished before we started; skip so we don't fire a late full-time.
 		if (match.state === "post" && !prev) continue;
+
+		// SUMMARY GOAL CROSS-CHECK (2026-09-05). ESPN's /scoreboard competitor score can TRAIL its own
+		// /summary keyEvents for a goal, which delayed the goal push + V2-LA while the app's play-by-play
+		// (summary) already showed it (device-observed twice, both away goals). For a LIVE match, RAISE the
+		// effective score to the summary's stated goals so detection/persist/LA-sync fire on time. This is
+		// best-effort: any fetch/parse failure keeps the scoreboard score (today's behavior, no regression).
+		// It only RAISES — the scoreboard stays authoritative for VAR DECREASES, which still flow through the
+		// correction path below (the "NO GOAL · VAR review" push is kept intentionally — VAR is part of the
+		// game, owner 2026-09-05).
+		if (match.state === "in") {
+			try {
+				const feed = eventFeed.get(event.id) ?? NWSL_FEED;
+				const leagueParam = feed === NWSL_FEED ? "" : `&league=${encodeURIComponent(feed)}`;
+				const res = await env.PROXY.fetch(`${PROXY_SUMMARY}?event=${match.eventId}${leagueParam}&_lc=${now}`, {
+					headers: { Accept: "application/json" },
+				});
+				if (res.ok) {
+					const sum = (await res.json()) as { keyEvents?: unknown };
+					const sg = summaryGoalScore(sum.keyEvents, match.home.name, match.away.name);
+					if (sg) {
+						if (sg.home > match.home.score) match.home.score = sg.home;
+						if (sg.away > match.away.score) match.away.score = sg.away;
+					}
+				}
+			} catch (err) {
+				console.log(`[watcher] summary goal cross-check failed (${match.eventId}): ${err}`);
+			}
+		}
 
 		const detected = detectEvents(prev, match);
 
