@@ -194,6 +194,52 @@ function toScore(raw?: string): number {
 	return Number.isFinite(n) ? n : 0;
 }
 
+function escapeRegExp(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The number stated immediately after `name` in a goal narrative, or null. Tries the full team
+ *  displayName then a de-suffixed short form (ESPN's keyEvent text drops the "FC"/"SC"/"CF" the
+ *  scoreboard displayName carries — "Angel City FC" vs "…Angel City 1"). */
+function scoreForName(text: string, name: string): number | null {
+	const variants = [name, name.replace(/\s+(?:FC|SC|CF)\.?$/i, "").trim()];
+	for (const n of variants) {
+		if (!n) continue;
+		const m = new RegExp(`${escapeRegExp(n)}\\s+(\\d+)`).exec(text);
+		if (m) return parseInt(m[1], 10);
+	}
+	return null;
+}
+
+/** The current per-side score as stated by ESPN's /summary `keyEvents` goal narratives — the source
+ *  the app's play-by-play reads, which can LEAD the scoreboard's competitor score for a goal. Each goal
+ *  keyEvent's `text` states the running score ("Goal! Racing Louisville 0, Angel City 1. …"); we take
+ *  the MAX per side across all goal narratives (order-independent; scores are monotonic, and a
+ *  VAR-disallowed goal is REMOVED from keyEvents so its narrative is gone). OWN-GOAL-SAFE: the text
+ *  states the score regardless of who scored, so we never mis-attribute an own goal to the wrong side.
+ *  Returns null when nothing parses → the caller keeps the scoreboard score (no regression). Used ONLY
+ *  to RAISE the effective score (never lower — the scoreboard stays authoritative for VAR decreases). */
+export function summaryGoalScore(
+	keyEvents: unknown,
+	homeName: string,
+	awayName: string,
+): { home: number; away: number } | null {
+	if (!Array.isArray(keyEvents) || !homeName || !awayName) return null;
+	let home: number | null = null;
+	let away: number | null = null;
+	for (const raw of keyEvents) {
+		const e = raw as { scoringPlay?: boolean; type?: { type?: string; text?: string }; text?: string };
+		const kind = (e?.type?.type ?? e?.type?.text ?? "").toLowerCase();
+		if (!e?.scoringPlay || !kind.includes("goal") || typeof e.text !== "string") continue;
+		const h = scoreForName(e.text, homeName);
+		const a = scoreForName(e.text, awayName);
+		if (h === null || a === null) continue;
+		home = home === null ? h : Math.max(home, h);
+		away = away === null ? a : Math.max(away, a);
+	}
+	return home === null || away === null ? null : { home, away };
+}
+
 /** Parse a minute out of an ESPN play clock displayValue ("67'", "45'+2'" → 45). */
 function parseMinute(displayValue?: string): number | undefined {
 	const m = /(\d{1,3})/.exec(displayValue ?? "");
