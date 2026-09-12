@@ -456,11 +456,16 @@ export interface MetronomeStatus {
 /**
  * TickMetronome (2026-09-12) — the watcher's tick source. ONE instance (`idFromName("watcher")`).
  *
- * Its alarm fires at every wall-clock minute, runs `runTick`, and re-arms itself for the next :00 in a
- * `finally`, so a throwing tick can never break the chain. A throw is logged and NOT re-thrown on purpose:
- * Cloudflare would otherwise retry the alarm with backoff on top of our own next-minute re-arm and run
- * two ticks close together — exactly the concurrent-tick race this design exists to remove. The Durable
- * Object's input gate already serialises alarm invocations, so ticks never overlap.
+ * Its alarm fires at every wall-clock minute. ⚠️ ARM-FIRST: it re-arms itself for the next :00 BEFORE running
+ * `runTick` (live-proven 2026-09-12 cutover): Cloudflare CLEARS the pending alarm the moment it starts
+ * delivering it, so during the tick's run `getAlarm()` is null — re-arming only afterwards left a 2–21 s hole
+ * every minute in which the cron watchdog read "no alarm" as a broken chain and armed a spurious duplicate
+ * (which the runtime then Canceled — harmless, but noise and a latent double-tick dependency on runtime
+ * semantics). Arming first also means a throwing tick can never break the chain. A throw is logged and
+ * NOT re-thrown on purpose: Cloudflare would otherwise retry the alarm with backoff on top of our own
+ * next-minute arm and run two ticks close together — exactly the concurrent-tick race this design exists
+ * to remove. The Durable Object's input gate serialises alarm invocations, so ticks never overlap, and a
+ * tick (≤ ~26 s budget, ≤ ~38 s worst case with the VAR debounce) always finishes before the next :00.
  *
  * `ensure()` is the watchdog entry (called by the cron every minute and by `POST /tick`): it (re-)arms the
  * alarm only when `shouldRearm` says the chain is broken — never on a healthy chain, because `setAlarm`
@@ -471,13 +476,15 @@ export interface MetronomeStatus {
 export class TickMetronome extends DurableObject<Env> {
 	async alarm(): Promise<void> {
 		const started = Date.now();
+		// ARM FIRST (see the class comment): the next :00 is pending for the whole run, so the watchdog's
+		// getAlarm() never sees a hole, and a throw below cannot break the chain.
+		await this.ctx.storage.setAlarm(nextMinuteBoundary(started));
 		try {
 			await runTick(this.env);
 		} catch (err) {
 			console.log(`[watcher] metronome tick threw: ${err}`);
 		} finally {
 			await this.ctx.storage.put("lastRunAt", started);
-			await this.ctx.storage.setAlarm(nextMinuteBoundary(Date.now()));
 		}
 	}
 
