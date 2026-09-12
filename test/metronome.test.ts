@@ -66,6 +66,20 @@ test("shouldRearm: a healthy chain (alarm pending within a period, recent run) i
 	assert.equal(shouldRearm(alarmAt, null, T0), false, "fresh DO with an alarm armed but no run yet — let it fire");
 });
 
+test("shouldRearm: the cron watchdog landing MID-TICK (arm-first alarm) must NOT re-arm — the live-proven 2026-09-12 case", () => {
+	// Alarm fired at :00 and, ARM-FIRST, set the next :00 before running the ~21 s tick. The cron watchdog
+	// fires ~7–11 s later, while the tick is still running: it must see the pending next-:00 alarm and the
+	// PREVIOUS minute's lastRunAt (~67 s ago) and leave the chain alone. (Re-arming in a `finally` instead
+	// left getAlarm() null for the whole run → spurious "metronome was down" + a Canceled duplicate alarm.)
+	const minute = Date.UTC(2026, 8, 12, 3, 13, 0, 0);
+	const alarmAt = minute + TICK_PERIOD_MS; // armed first, for the next :00
+	const lastRunAt = minute - TICK_PERIOD_MS + 400; // previous minute's tick start (written in its finally)
+	const watchdogAt = minute + 10_500; // cron delivery jitter, tick still in flight
+	assert.equal(shouldRearm(alarmAt, lastRunAt, watchdogAt), false);
+	// …and at the END of a long live tick (26 s budget), still healthy.
+	assert.equal(shouldRearm(alarmAt, lastRunAt, minute + 26_000), false);
+});
+
 test("shouldRearm: no alarm at all → re-arm (fresh DO, or a setAlarm that never happened)", () => {
 	assert.equal(shouldRearm(null, null, T0), true);
 	assert.equal(shouldRearm(null, T0 - 10_000, T0), true);
