@@ -862,7 +862,14 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 			try {
 				const feed = eventFeed.get(event.id) ?? NWSL_FEED;
 				const leagueParam = feed === NWSL_FEED ? "" : `&league=${encodeURIComponent(feed)}`;
-				const res = await env.PROXY.fetch(`${PROXY_SUMMARY}?event=${match.eventId}${leagueParam}&_lc=${now}`, {
+				// Cache-bust ONLY on the 2nd poll — mirroring /scoreboard's own `_cb` pattern (2026-09-12 audit).
+				// The proxy caches /summary on the FULL URL and never strips `_lc`, so a per-poll `_lc=${now}` made
+				// EVERY call a guaranteed edge miss + a forced ESPN recompute (+720 ESPN hits/day on a 2-match
+				// day — the "reads only, cached" note in #44 was wrong in effect). Poll 1 now rides the proxy's
+				// 30-s live edge entry (≤30 s stale — well inside the goal-lag this check exists to catch); poll 2
+				// stays fresh. Detection logic below is untouched.
+				const lc = cacheBust ? `&_lc=${now}` : "";
+				const res = await env.PROXY.fetch(`${PROXY_SUMMARY}?event=${match.eventId}${leagueParam}${lc}`, {
 					headers: { Accept: "application/json" },
 				});
 				if (res.ok) {
