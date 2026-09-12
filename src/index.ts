@@ -870,11 +870,14 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 				const feed = eventFeed.get(event.id) ?? NWSL_FEED;
 				const leagueParam = feed === NWSL_FEED ? "" : `&league=${encodeURIComponent(feed)}`;
 				// Cache-bust ONLY on the 2nd poll — mirroring /scoreboard's own `_cb` pattern (2026-09-12 audit).
-				// The proxy caches /summary on the FULL URL and never strips `_lc`, so a per-poll `_lc=${now}` made
-				// EVERY call a guaranteed edge miss + a forced ESPN recompute (+720 ESPN hits/day on a 2-match
-				// day — the "reads only, cached" note in #44 was wrong in effect). Poll 1 now rides the proxy's
-				// 30-s live edge entry (≤30 s stale — well inside the goal-lag this check exists to catch); poll 2
-				// stays fresh. Detection logic below is untouched.
+				// The proxy caches /summary on the FULL URL and never strips `_lc`, so a per-poll `_lc=${now}` gave
+				// every call a UNIQUE cache key. ⚠️ CORRECTED SAME NIGHT: this does NOT reduce ESPN fetches — the
+				// proxy's live TTL is 30 s and poll 1 re-reads this key only every 60 s, so poll 1 misses and hits
+				// ESPN regardless (both polls stay FRESH — good for goal latency). What the stable poll-1 URL DOES
+				// buy: the proxy's stale/snapshot recovery ladder is keyed on the un-busted URL, so an ESPN blip on
+				// poll 1 can now serve last-known-good instead of failing; and poll 1 no longer writes dead cache
+				// entries. #44's real cost stands: 2 forced ESPN /summary recomputes per live match per minute
+				// (16/min on an 8-match day) — the number to watch for ESPN 429s. Detection logic is untouched.
 				const lc = cacheBust ? `&_lc=${now}` : "";
 				const res = await env.PROXY.fetch(`${PROXY_SUMMARY}?event=${match.eventId}${leagueParam}${lc}`, {
 					headers: { Accept: "application/json" },
