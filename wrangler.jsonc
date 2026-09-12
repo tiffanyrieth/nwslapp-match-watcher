@@ -8,14 +8,26 @@
 	"observability": {
 		"enabled": true,
 	},
-	// Cloudflare's cron floor is 1 minute. Sub-minute polling would need a Durable
-	// Object alarm (scale-only future work).
-	// Just the per-minute live tick. The once-daily post-match Predict-results pass (Change 8) is NOT a
-	// second cron — the account is at the Workers-free cron cap (5: the proxy's 4 + this one). It rides
-	// THIS tick instead, gated to ~14:00 UTC by a once-per-day KV marker (`maybeRunPredictResultsPass`).
+	// ⚠️ THE TICK IS NOT DRIVEN BY THIS CRON ANY MORE (2026-09-12). The per-minute tick is driven by the
+	// TickMetronome Durable Object ALARM below; this `* * * * *` cron is a WATCHDOG only — each run checks the
+	// alarm is armed (re-arms it if the chain broke) and never runs the tick itself. Why: Cloudflare Cron
+	// Triggers dispatch stalled 5× in 9 days (9/03→9/12, CF incident sjs8s0q2x4hw) — both workers' crons
+	// silent for minutes–hours while fetch kept working, then a REPLAY burst that ran two ticks 97 ms apart
+	// and duplicated a Live Activity card. DO alarms are at-least-once, no-SPOF, on a different dispatch
+	// path. Full record: docs/notifications.md (cron section) + docs/decisions.md. src/metronome.ts.
+	// Keeping the cron costs nothing and keeps the account's cron count unchanged (it is at the Workers-free
+	// cap of 5: the proxy's 4 + this one). The once-daily Predict-results pass and the Monday KHG publish
+	// still ride the TICK (now the alarm), gated by their own KV markers — unchanged.
 	"triggers": {
 		"crons": ["* * * * *"],
 	},
+	// TickMetronome (src/index.ts): ONE instance ("watcher"), SQLite-backed (the only DO storage on the Free
+	// plan). Its alarm() runs `runTick` and re-arms itself for the next :00. Load: 1,440 alarm invocations +
+	// 1,440 rows-written per day ≈ 1.4% of the Free DO allowances (docs/stress-testing.md §7).
+	"durable_objects": {
+		"bindings": [{ "name": "TICK_METRONOME", "class_name": "TickMetronome" }],
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["TickMetronome"] }],
 	// Per-match last-known scores (created via `wrangler kv namespace create MATCH_STATE`).
 	"kv_namespaces": [
 		{
