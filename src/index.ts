@@ -54,8 +54,14 @@ import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } f
 import { buildMessages, collapseIdFor, enqueueFanout, type FanoutMessage } from "./fanout";
 import { drainMessage } from "./drain";
 import { broadcastEnd, broadcastUpdate, createChannel, createChannelSigned, deleteChannel, listChannels } from "./broadcast";
+import { DurableObject } from "cloudflare:workers";
+import { isStaleScheduledTick, nextMinuteBoundary, scheduledTimeMs, shouldRearm } from "./metronome";
 
 export interface Env {
+	/** The tick metronome (2026-09-12): ONE Durable Object whose alarm drives the per-minute tick. The
+	 *  `* * * * *` cron only re-arms it. See src/metronome.ts for the why (CF cron-dispatch stalls). */
+	TICK_METRONOME: DurableObjectNamespace<TickMetronome>;
+
 	/** KV namespace holding per-match last-known scores (key `match:{eventId}`). */
 	MATCH_STATE: KVNamespace;
 
@@ -198,6 +204,10 @@ const MATCH_CONCURRENCY = 8;
 const TICK_BUDGET_MS = 26_000; // whole-tick ceiling we hold ourselves to, safely under the ~30s platform limit
 const SECOND_POLL_GAP_MS = 20_000; // normal-case gap before the 2nd poll (was a fixed 30_000 sleep)
 const SECOND_POLL_RESERVE_MS = 4_000; // headroom reserved for poll 2 + the daily/KHG/heartbeat passes
+
+// Heartbeat ping bound (2026-09-12 audit): the healthchecks.io ping was a bare `await fetch(hc)` with no
+// timeout — the tick's only unbounded external await. A hung ping must never extend a tick; abort at 5s.
+const HEARTBEAT_TIMEOUT_MS = 5_000;
 
 // "Lineups posted" push: start polling /summary this far before kickoff. ESPN posts the XI ~1h out;
 // 75 min gives margin for an early publish. Cron is per-minute → detection fires within ≤60s of the post.
@@ -387,52 +397,140 @@ async function sweepOrphanChannels(env: Env, apns: ApnsConfig): Promise<void> {
 	if (deleted > 0) console.log(`[watcher] orphan channel sweep: deleted ${deleted} of ${channels.length}`);
 }
 
+/**
+ * THE TICK — one full watcher cycle. Extracted VERBATIM (2026-09-12) from the old inline `scheduled()` body so
+ * the identical code runs regardless of what triggers it: the TickMetronome alarm (the tick source), or the
+ * manual `POST /tick` lever. The cron no longer runs it (see `scheduled` below). Behaviour inside is unchanged.
+ *
+ * Cloudflare's cron floor is 1 minute, but a live match wants ~30s reactions (goal/HT/FT latency), so we
+ * DOUBLE-POLL inside the one invocation: poll once, and IF a match is live/near-kickoff, wait and poll again
+ * with a cache-bust (the proxy live TTL is 30s, so an un-busted re-poll would re-read the same cached
+ * scoreboard). Gated on the live window, so the 23h/day with no match cost zero extra wall-time / ESPN hits.
+ * KV fire-once state chains the two polls naturally (poll 1 sees 0–0, poll 2 sees 1–0 → fires once).
+ */
+async function runTick(env: Env): Promise<void> {
+	const tickStart = Date.now();
+	const live = await runWatch(env); // first poll — rides the shared 30s edge cache
+	if (live) {
+		// Second poll → ~sub-minute goal/HT/FT latency without a sub-minute trigger. The in-tick gap is
+		// BUDGETED, not a fixed 30s sleep: a live tick must finish well under Cloudflare's ~30s per-invocation
+		// ceiling, and a fixed 30s left ~zero headroom, so live ticks were tipping into exceededCpu kills on
+		// multi-game days. Clamp the gap so poll1 + gap + poll2 stays under TICK_BUDGET_MS regardless of how
+		// long poll1 ran, capped at SECOND_POLL_GAP_MS for the normal fast case (the match loop is concurrent,
+		// so poll1 is fast and flat in the match count — see runWatch / mapLimit).
+		const gap = Math.min(SECOND_POLL_GAP_MS, TICK_BUDGET_MS - (Date.now() - tickStart) - SECOND_POLL_RESERVE_MS);
+		if (gap > 0) await sleep(gap);
+		await runWatch(env, true); // second poll — cache-busted for a fresh ESPN read
+	}
+	// The once-daily Predict-results pass (Change 8) rides THIS per-minute tick (the account is at the
+	// Workers-free 5-cron cap, so it can't have its own cron). Self-gates via a once-per-hour KV marker.
+	await maybeRunPredictResultsPass(env);
+	// The Monday KHG publish (2026-08-12 split) rides this tick too — self-gates to Monday ~10:00 UTC via a
+	// once-per-week KV marker, a no-op time check on every other tick.
+	await maybeRunKnowHerPublishPass(env);
+	// Dead-tick watchdog (2026-07-16): ping healthchecks.io at the END of every tick — runs even when runWatch
+	// failed (it reports "the tick source is ALIVE", not "the tick succeeded"; tick-level failures already
+	// log/diag on their own). If the pings STOP, healthchecks emails the owner — the one failure class no
+	// self-hosted alert can cover. Unset secret → no-op. BOUNDED (2026-09-12): a hung ping can't stall a tick.
+	const hc = (env as unknown as { HEALTHCHECK_URL?: string }).HEALTHCHECK_URL;
+	if (hc) {
+		try {
+			await fetch(hc, { signal: AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS) });
+		} catch (err) {
+			console.log(`[watcher] heartbeat ping failed: ${err}`);
+		}
+	}
+}
+
+/** Status snapshot of the metronome — returned by `ensure()`/`status()` and `GET /tick/status`. */
+export interface MetronomeStatus {
+	/** Epoch ms the next alarm is set for, or null if none is armed. */
+	alarmAt: number | null;
+	/** Epoch ms the last alarm-driven tick STARTED, or null if it has never run. */
+	lastRunAt: number | null;
+	/** True when this call had to (re-)arm the alarm. */
+	rearmed: boolean;
+	now: number;
+}
+
+/**
+ * TickMetronome (2026-09-12) — the watcher's tick source. ONE instance (`idFromName("watcher")`).
+ *
+ * Its alarm fires at every wall-clock minute, runs `runTick`, and re-arms itself for the next :00 in a
+ * `finally`, so a throwing tick can never break the chain. A throw is logged and NOT re-thrown on purpose:
+ * Cloudflare would otherwise retry the alarm with backoff on top of our own next-minute re-arm and run
+ * two ticks close together — exactly the concurrent-tick race this design exists to remove. The Durable
+ * Object's input gate already serialises alarm invocations, so ticks never overlap.
+ *
+ * `ensure()` is the watchdog entry (called by the cron every minute and by `POST /tick`): it (re-)arms the
+ * alarm only when `shouldRearm` says the chain is broken — never on a healthy chain, because `setAlarm`
+ * REPLACES the pending alarm and re-arming a healthy metronome would only shift its cadence.
+ *
+ * Why a DO alarm and not the cron: docs/notifications.md (cron section), src/metronome.ts header.
+ */
+export class TickMetronome extends DurableObject<Env> {
+	async alarm(): Promise<void> {
+		const started = Date.now();
+		try {
+			await runTick(this.env);
+		} catch (err) {
+			console.log(`[watcher] metronome tick threw: ${err}`);
+		} finally {
+			await this.ctx.storage.put("lastRunAt", started);
+			await this.ctx.storage.setAlarm(nextMinuteBoundary(Date.now()));
+		}
+	}
+
+	async ensure(): Promise<MetronomeStatus> {
+		const now = Date.now();
+		const alarmAt = await this.ctx.storage.getAlarm();
+		const lastRunAt = (await this.ctx.storage.get<number>("lastRunAt")) ?? null;
+		let rearmed = false;
+		if (shouldRearm(alarmAt, lastRunAt, now)) {
+			await this.ctx.storage.setAlarm(now + 1_000);
+			rearmed = true;
+			console.log(`[watcher] metronome re-armed (alarmAt=${alarmAt ?? "none"} lastRunAt=${lastRunAt ?? "never"})`);
+		}
+		return { alarmAt: await this.ctx.storage.getAlarm(), lastRunAt, rearmed, now };
+	}
+
+	async status(): Promise<MetronomeStatus> {
+		return {
+			alarmAt: await this.ctx.storage.getAlarm(),
+			lastRunAt: (await this.ctx.storage.get<number>("lastRunAt")) ?? null,
+			rearmed: false,
+			now: Date.now(),
+		};
+	}
+}
+
+/** The single metronome instance. */
+const metronome = (env: Env): DurableObjectStub<TickMetronome> => env.TICK_METRONOME.get(env.TICK_METRONOME.idFromName("watcher"));
+
 export default {
-	// Cron entry point (configured in wrangler.jsonc: "* * * * *").
-	//
-	// Cloudflare's cron floor is 1 minute, but a live match wants ~30s reactions (goal/HT/FT
-	// latency). So instead of a Durable Object alarm we DOUBLE-POLL inside the one invocation:
-	// poll once, and IF a match is live/near-kickoff, wait 30s and poll again with a cache-bust
-	// (the fresh read the second poll needs — the proxy live TTL is 30s, so an un-busted re-poll
-	// would just re-read the same cached scoreboard). Gated on the live window, so the 23h/day
-	// with no match cost zero extra wall-time / ESPN hits. KV fire-once state chains the two polls
-	// naturally (poll 1 sees 0–0, poll 2 sees 1–0 → fires once, writes state).
-	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+	// Cron entry point (wrangler.jsonc: "* * * * *") — a WATCHDOG since 2026-09-12, NOT the tick source.
+	// It makes sure the TickMetronome alarm is armed and does nothing else. It must NEVER call runTick:
+	// one tick source ⇒ no concurrent ticks ⇒ no `la-start`-marker races (the duplicate-card bug).
+	async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		// STALE-TICK GUARD: after a Cloudflare cron-dispatch stall, CF REPLAYS the missed ticks in a burst,
+		// out of order, with scheduledTime stamps minutes old (observed 2026-09-12: 162–375s late, two ticks
+		// 97 ms apart). A replayed watchdog run is harmless but pointless — the fresh tick covers it — and
+		// skipping it keeps the burst from doing anything at all. Normal delivery jitter is 25–30s; 90s margin.
+		const now = Date.now();
+		if (isStaleScheduledTick(event.scheduledTime, now)) {
+			const lateS = Math.round((now - scheduledTimeMs(event.scheduledTime)) / 1000);
+			console.log(`[watcher] cron watchdog: skipping REPLAYED tick (scheduled ${new Date(scheduledTimeMs(event.scheduledTime)).toISOString()}, ${lateS}s late)`);
+			return;
+		}
 		ctx.waitUntil(
 			(async () => {
-				const tickStart = Date.now();
-				const live = await runWatch(env); // first poll — rides the shared 30s edge cache
-				if (live) {
-					// Second poll → ~sub-minute goal/HT/FT latency without a sub-minute cron (CF's floor is
-					// 60s). The in-tick gap is BUDGETED, not a fixed 30s sleep: a live tick must finish well
-					// under Cloudflare's ~30s per-invocation ceiling, and a fixed 30s left ~zero headroom, so
-					// live ticks were tipping into exceededCpu kills on multi-game days. Clamp the gap so
-					// poll1 + gap + poll2 stays under TICK_BUDGET_MS regardless of how long poll1 ran, capped
-					// at SECOND_POLL_GAP_MS for the normal fast case (the match loop is now concurrent, so
-					// poll1 is fast and flat in the match count — see runWatch / mapLimit).
-					const gap = Math.min(SECOND_POLL_GAP_MS, TICK_BUDGET_MS - (Date.now() - tickStart) - SECOND_POLL_RESERVE_MS);
-					if (gap > 0) await sleep(gap);
-					await runWatch(env, true); // second poll — cache-busted for a fresh ESPN read
-				}
-				// The once-daily Predict-results pass (Change 8) rides THIS per-minute tick (the account is
-				// at the Workers-free 5-cron cap, so it can't have its own cron). Self-gates to ~14:00 UTC
-				// via a once-per-day KV marker — a no-op time check on all but one tick a day.
-				await maybeRunPredictResultsPass(env);
-				// The Monday KHG publish (2026-08-12 split) rides this tick too — self-gates to Monday
-				// ~10:00 UTC via a once-per-week KV marker, a no-op time check on every other tick.
-				await maybeRunKnowHerPublishPass(env);
-				// Dead-cron watchdog (2026-07-16): ping healthchecks.io at the END of every tick —
-				// runs even when runWatch failed (the watchdog reports "the cron is ALIVE", not
-				// "the tick succeeded"; tick-level failures already log/diag on their own). If the
-				// pings STOP, healthchecks emails the owner — the one failure class no self-hosted
-				// alert can cover (a dead worker can't email anyone). Unset secret → no-op.
-				const hc = (env as unknown as { HEALTHCHECK_URL?: string }).HEALTHCHECK_URL;
-				if (hc) {
-					try {
-						await fetch(hc);
-					} catch (err) {
-						console.log(`[watcher] heartbeat ping failed: ${err}`);
-					}
+				try {
+					const s = await metronome(env).ensure();
+					if (s.rearmed) console.log(`[watcher] cron watchdog: metronome was down — re-armed (lastRunAt=${s.lastRunAt ?? "never"})`);
+				} catch (err) {
+					// LOUD: the watchdog can't reach the metronome. The heartbeat (inside runTick) will also stop
+					// if the alarm is truly dead, so healthchecks.io still pages the owner.
+					console.log(`[watcher] cron watchdog: metronome unreachable — ${err}`);
 				}
 			})(),
 		);
@@ -494,6 +592,36 @@ export default {
 
 		if (request.method === "POST" && url.pathname === "/predict-results-run") {
 			return handlePredictResultsRun(request, url, env);
+		}
+
+		// MANUAL TICK / UNSTICK LEVER (2026-09-12). Runs one tick NOW (same runTick the alarm runs) and makes
+		// sure the metronome alarm is armed — the one-curl recovery if the tick source ever stalls, and the
+		// drop-in hook for an external pinger if one is ever wanted. Same secret as the other admin routes.
+		if (request.method === "POST" && url.pathname === "/tick") {
+			if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) return new Response("Forbidden", { status: 403 });
+			ctx.waitUntil(
+				(async () => {
+					try {
+						await metronome(env).ensure();
+					} catch (err) {
+						console.log(`[watcher] /tick: metronome ensure failed — ${err}`);
+					}
+					await runTick(env);
+				})(),
+			);
+			return new Response("tick started; metronome ensured\n", { status: 202 });
+		}
+
+		// Metronome status (alarmAt / lastRunAt) — the quick "is the tick source alive?" read.
+		if (request.method === "GET" && url.pathname === "/tick/status") {
+			if (request.headers.get("x-trigger-secret") !== env.MANUAL_TRIGGER_SECRET) return new Response("Forbidden", { status: 403 });
+			const s = await metronome(env).status();
+			return Response.json({
+				...s,
+				alarmAtISO: s.alarmAt === null ? null : new Date(s.alarmAt).toISOString(),
+				lastRunAtISO: s.lastRunAt === null ? null : new Date(s.lastRunAt).toISOString(),
+				lastRunAgeS: s.lastRunAt === null ? null : Math.round((s.now - s.lastRunAt) / 1000),
+			});
 		}
 
 		return new Response("Not found.", { status: 404 });
