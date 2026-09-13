@@ -1,0 +1,318 @@
+{
+ "_source": "ESPN via nwslapp-proxy, captured 2026-09-13; 2025 Euro ITA@ENG 2-1 AET (no pens); trimmed",
+ "scoreboardEvent": {
+  "id": "725224",
+  "name": "ITA @ ENG",
+  "season": {
+   "year": 2025,
+   "type": 13081,
+   "slug": "semifinals"
+  },
+  "status": {
+   "clock": 7200.0,
+   "displayClock": "120'+4'",
+   "period": 4,
+   "type": {
+    "id": "45",
+    "name": "STATUS_FINAL_AET",
+    "state": "post",
+    "completed": true,
+    "description": "Final Score - After Extra Time",
+    "detail": "AET",
+    "shortDetail": "AET"
+   }
+  },
+  "competitions": [
+   {
+    "status": {
+     "clock": 7200.0,
+     "displayClock": "120'+4'",
+     "period": 4,
+     "type": {
+      "id": "45",
+      "name": "STATUS_FINAL_AET",
+      "state": "post",
+      "completed": true,
+      "description": "Final Score - After Extra Time",
+      "detail": "AET",
+      "shortDetail": "AET"
+     }
+    },
+    "notes": [],
+    "competitors": [
+     {
+      "homeAway": "home",
+      "score": "2",
+      "shootoutScore": null,
+      "winner": true,
+      "advance": true,
+      "team": {
+       "id": "5159",
+       "abbreviation": "ENG",
+       "displayName": "England"
+      }
+     },
+     {
+      "homeAway": "away",
+      "score": "1",
+      "shootoutScore": null,
+      "winner": false,
+      "advance": false,
+      "team": {
+       "id": "2792",
+       "abbreviation": "ITA",
+       "displayName": "Italy"
+      }
+     }
+    ],
+    "details": [
+     {
+      "clock": {
+       "value": 1929.0,
+       "displayValue": "33'"
+      },
+      "team": {
+       "id": "2792"
+      },
+      "scoringPlay": true,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": false,
+      "type": {
+       "id": "70",
+       "text": "Goal"
+      },
+      "scoreValue": 1,
+      "athletesInvolved": [
+       {
+        "id": "255454",
+        "displayName": "Barbara Bonansea",
+        "shortName": "B. Bonansea",
+        "jersey": "11"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 4403.0,
+       "displayValue": "74'"
+      },
+      "team": {
+       "id": "2792"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "259759",
+        "displayName": "Laura Giuliani",
+        "shortName": "L. Giuliani",
+        "jersey": "1"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 4424.0,
+       "displayValue": "74'"
+      },
+      "team": {
+       "id": "2792"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": []
+     },
+     {
+      "clock": {
+       "value": 5269.0,
+       "displayValue": "88'"
+      },
+      "team": {
+       "id": "2792"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "255462",
+        "displayName": "Elena Linari",
+        "shortName": "E. Linari",
+        "jersey": "5"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 5400.0,
+       "displayValue": "90'+2'"
+      },
+      "team": {
+       "id": "2792"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "375091",
+        "displayName": "Michela Cambiaghi",
+        "shortName": "M. Cambiaghi",
+        "jersey": "21"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 5400.0,
+       "displayValue": "90'+2'"
+      },
+      "team": {
+       "id": "5159"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "311198",
+        "displayName": "Esme Morgan",
+        "shortName": "E. Morgan",
+        "jersey": "15"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 5400.0,
+       "displayValue": "90'+6'"
+      },
+      "team": {
+       "id": "5159"
+      },
+      "scoringPlay": true,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": false,
+      "type": {
+       "id": "70",
+       "text": "Goal"
+      },
+      "scoreValue": 1,
+      "athletesInvolved": [
+       {
+        "id": "350678",
+        "displayName": "Michelle Agyemang",
+        "shortName": "M. Agyemang",
+        "jersey": "17"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 7133.0,
+       "displayValue": "119'"
+      },
+      "team": {
+       "id": "5159"
+      },
+      "scoringPlay": true,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": false,
+      "type": {
+       "id": "70",
+       "text": "Goal"
+      },
+      "scoreValue": 1,
+      "athletesInvolved": [
+       {
+        "id": "282993",
+        "displayName": "Chloe Kelly",
+        "shortName": "C. Kelly",
+        "jersey": "18"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 7200.0,
+       "displayValue": "120'+4'"
+      },
+      "team": {
+       "id": "5159"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "280982",
+        "displayName": "Beth Mead",
+        "shortName": "B. Mead",
+        "jersey": "9"
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ }
+}

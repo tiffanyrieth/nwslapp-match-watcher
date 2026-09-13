@@ -1,0 +1,1590 @@
+{
+ "_source": "ESPN via nwslapp-proxy, captured 2026-09-13; 2024 NWSL semifinal GFC@WAS 1-1, WAS 3-0 pens; trimmed to fields the watcher/app read",
+ "scoreboardEvent": {
+  "id": "712961",
+  "name": "GFC @ WAS",
+  "season": {
+   "year": 2024,
+   "type": 12429,
+   "slug": "playoffs---semifinals"
+  },
+  "status": {
+   "clock": 7200.0,
+   "displayClock": "120'",
+   "period": 5,
+   "type": {
+    "id": "47",
+    "name": "STATUS_FINAL_PEN",
+    "state": "post",
+    "completed": true,
+    "description": "Final Score - After Penalties",
+    "detail": "FT-Pens",
+    "shortDetail": "FT-Pens"
+   }
+  },
+  "competitions": [
+   {
+    "status": {
+     "clock": 7200.0,
+     "displayClock": "120'",
+     "period": 5,
+     "type": {
+      "id": "47",
+      "name": "STATUS_FINAL_PEN",
+      "state": "post",
+      "completed": true,
+      "description": "Final Score - After Penalties",
+      "detail": "FT-Pens",
+      "shortDetail": "FT-Pens"
+     }
+    },
+    "notes": [
+     {
+      "text": "Washington Spirit advance 3-0 on penalties",
+      "headline": "Washington Spirit advance 3-0 on penalties",
+      "type": "event"
+     }
+    ],
+    "competitors": [
+     {
+      "homeAway": "home",
+      "score": "1",
+      "shootoutScore": 3,
+      "winner": true,
+      "advance": true,
+      "team": {
+       "id": "15365",
+       "abbreviation": "WAS",
+       "displayName": "Washington Spirit"
+      }
+     },
+     {
+      "homeAway": "away",
+      "score": "1",
+      "shootoutScore": 0,
+      "winner": false,
+      "advance": false,
+      "team": {
+       "id": "15364",
+       "abbreviation": "GFC",
+       "displayName": "Gotham FC"
+      }
+     }
+    ],
+    "details": [
+     {
+      "clock": {
+       "value": 972.0,
+       "displayValue": "17'"
+      },
+      "team": {
+       "id": "15364"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "255453",
+        "displayName": "Jess Carter",
+        "shortName": "J. Carter",
+        "jersey": "27"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 1365.0,
+       "displayValue": "23'"
+      },
+      "team": {
+       "id": "15364"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "279307",
+        "displayName": "Delanie Sheehan",
+        "shortName": "D. Sheehan",
+        "jersey": "17"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 3340.0,
+       "displayValue": "56'"
+      },
+      "team": {
+       "id": "15364"
+      },
+      "scoringPlay": true,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": false,
+      "type": {
+       "id": "137",
+       "text": "Goal - Header"
+      },
+      "scoreValue": 1,
+      "athletesInvolved": [
+       {
+        "id": "259791",
+        "displayName": "Esther Gonz\u00e1lez",
+        "shortName": "E. Gonz\u00e1lez",
+        "jersey": "9"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 4300.0,
+       "displayValue": "72'"
+      },
+      "team": {
+       "id": "15364"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "328199",
+        "displayName": "Bruninha",
+        "shortName": "Bruninha",
+        "jersey": "3"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 5289.0,
+       "displayValue": "89'"
+      },
+      "team": {
+       "id": "15364"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": []
+     },
+     {
+      "clock": {
+       "value": 5400.0,
+       "displayValue": "90'+2'"
+      },
+      "team": {
+       "id": "15364"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "292633",
+        "displayName": "Jenna Nighswonger",
+        "shortName": "J. Nighswonger",
+        "jersey": "2"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 5400.0,
+       "displayValue": "90'+3'"
+      },
+      "team": {
+       "id": "15365"
+      },
+      "scoringPlay": true,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": false,
+      "type": {
+       "id": "137",
+       "text": "Goal - Header"
+      },
+      "scoreValue": 1,
+      "athletesInvolved": [
+       {
+        "id": "292603",
+        "displayName": "Hal Hershfelt",
+        "shortName": "H. Hershfelt",
+        "jersey": "17"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 5781.0,
+       "displayValue": "97'"
+      },
+      "team": {
+       "id": "15365"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "248778",
+        "displayName": "Casey Krueger",
+        "shortName": "C. Krueger",
+        "jersey": "3"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 6033.0,
+       "displayValue": "101'"
+      },
+      "team": {
+       "id": "15364"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": true,
+      "yellowCard": false,
+      "type": {
+       "id": "93",
+       "text": "Red Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "328199",
+        "displayName": "Bruninha",
+        "shortName": "Bruninha",
+        "jersey": "3"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 6104.0,
+       "displayValue": "102'"
+      },
+      "team": {
+       "id": "15365"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "317423",
+        "displayName": "Trinity Rodman",
+        "shortName": "T. Rodman",
+        "jersey": "2"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 6922.0,
+       "displayValue": "116'"
+      },
+      "team": {
+       "id": "15364"
+      },
+      "scoringPlay": false,
+      "shootout": false,
+      "ownGoal": false,
+      "penaltyKick": false,
+      "redCard": false,
+      "yellowCard": true,
+      "type": {
+       "id": "94",
+       "text": "Yellow Card"
+      },
+      "scoreValue": 0,
+      "athletesInvolved": [
+       {
+        "id": "267389",
+        "displayName": "McCall Zerboni",
+        "shortName": "M. Zerboni",
+        "jersey": "7"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 7200.0,
+       "displayValue": "120'"
+      },
+      "team": {
+       "id": "15365"
+      },
+      "scoringPlay": true,
+      "shootout": true,
+      "ownGoal": false,
+      "penaltyKick": true,
+      "redCard": false,
+      "yellowCard": false,
+      "type": {
+       "id": "104",
+       "text": "Penalty - Scored"
+      },
+      "scoreValue": 1,
+      "athletesInvolved": [
+       {
+        "id": "210318",
+        "displayName": "Ashley Hatch",
+        "shortName": "A. Hatch",
+        "jersey": "33"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 7200.0,
+       "displayValue": "120'"
+      },
+      "team": {
+       "id": "15365"
+      },
+      "scoringPlay": true,
+      "shootout": true,
+      "ownGoal": false,
+      "penaltyKick": true,
+      "redCard": false,
+      "yellowCard": false,
+      "type": {
+       "id": "104",
+       "text": "Penalty - Scored"
+      },
+      "scoreValue": 1,
+      "athletesInvolved": [
+       {
+        "id": "279478",
+        "displayName": "Lena Silano",
+        "shortName": "L. Silano",
+        "jersey": "4"
+       }
+      ]
+     },
+     {
+      "clock": {
+       "value": 7200.0,
+       "displayValue": "120'"
+      },
+      "team": {
+       "id": "15365"
+      },
+      "scoringPlay": true,
+      "shootout": true,
+      "ownGoal": false,
+      "penaltyKick": true,
+      "redCard": false,
+      "yellowCard": false,
+      "type": {
+       "id": "104",
+       "text": "Penalty - Scored"
+      },
+      "scoreValue": 1,
+      "athletesInvolved": [
+       {
+        "id": "263690",
+        "displayName": "Tara Rudd",
+        "shortName": "T. Rudd",
+        "jersey": "9"
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "summary": {
+  "header": {
+   "competitions": [
+    {
+     "status": {
+      "type": {
+       "id": "47",
+       "name": "STATUS_FINAL_PEN",
+       "state": "post",
+       "completed": true,
+       "description": "Final Score - After Penalties",
+       "detail": "FT-Pens",
+       "shortDetail": "FT-Pens"
+      }
+     },
+     "notes": [
+      {
+       "type": "event",
+       "headline": "Washington Spirit advance 3-0 on penalties"
+      },
+      {
+       "type": "event-ingest-note",
+       "date": "2024-11-17T23:07Z",
+       "text": "Washington Spirit advance 3-0 on penalties.",
+       "source": "38"
+      }
+     ],
+     "competitors": [
+      {
+       "homeAway": "home",
+       "score": "1",
+       "shootoutScore": 3.0,
+       "winner": true,
+       "advance": true,
+       "linescores": [
+        {
+         "displayValue": "0"
+        },
+        {
+         "displayValue": "1"
+        },
+        {
+         "displayValue": "0"
+        },
+        {
+         "displayValue": "0"
+        },
+        {
+         "displayValue": "3"
+        }
+       ],
+       "team": {
+        "id": "15365",
+        "abbreviation": "WAS",
+        "displayName": "Washington Spirit"
+       }
+      },
+      {
+       "homeAway": "away",
+       "score": "1",
+       "shootoutScore": 0.0,
+       "winner": false,
+       "advance": false,
+       "linescores": [
+        {
+         "displayValue": "0"
+        },
+        {
+         "displayValue": "1"
+        },
+        {
+         "displayValue": "0"
+        },
+        {
+         "displayValue": "0"
+        },
+        {
+         "displayValue": "0"
+        }
+       ],
+       "team": {
+        "id": "15364",
+        "abbreviation": "GFC",
+        "displayName": "Gotham FC"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "keyEvents": [
+   {
+    "id": "44219964",
+    "clock": {
+     "value": 0.0,
+     "displayValue": ""
+    },
+    "period": {
+     "number": 1
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "80",
+     "text": "Kickoff",
+     "type": "kickoff"
+    },
+    "team": null,
+    "participants": [],
+    "text": null
+   },
+   {
+    "id": "44220151",
+    "clock": {
+     "value": 972.0,
+     "displayValue": "17'"
+    },
+    "period": {
+     "number": 1
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "94",
+     "text": "Yellow Card",
+     "type": "yellow-card"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "255453",
+       "displayName": "Jess Carter",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Jess Carter (Gotham FC) is shown the yellow card for a bad foul."
+   },
+   {
+    "id": "44220224",
+    "clock": {
+     "value": 1365.0,
+     "displayValue": "23'"
+    },
+    "period": {
+     "number": 1
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "94",
+     "text": "Yellow Card",
+     "type": "yellow-card"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "279307",
+       "displayName": "Delanie Sheehan",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Delanie Sheehan (Gotham FC) is shown the yellow card for a bad foul."
+   },
+   {
+    "id": "44220426",
+    "clock": {
+     "value": 2700.0,
+     "displayValue": "45'+3'"
+    },
+    "period": {
+     "number": 1
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "81",
+     "text": "Halftime",
+     "type": "halftime"
+    },
+    "team": null,
+    "participants": [],
+    "text": null
+   },
+   {
+    "id": "44220505",
+    "clock": {
+     "value": 2700.0,
+     "displayValue": "45'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "292633",
+       "displayName": "Jenna Nighswonger",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "255453",
+       "displayName": "Jess Carter",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Gotham FC. Jenna Nighswonger replaces Jess Carter."
+   },
+   {
+    "id": "44220506",
+    "clock": {
+     "value": 2700.0,
+     "displayValue": "45'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "82",
+     "text": "Start 2nd Half",
+     "type": "start-2nd-half"
+    },
+    "team": null,
+    "participants": [],
+    "text": null
+   },
+   {
+    "id": "44220618",
+    "clock": {
+     "value": 3340.0,
+     "displayValue": "56'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": true,
+    "shootout": false,
+    "type": {
+     "id": "137",
+     "text": "Goal - Header",
+     "type": "goal---header"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "259791",
+       "displayName": "Esther Gonz\u00e1lez",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "263902",
+       "displayName": "Yazmeen Ryan",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Goal! Washington Spirit 0, Gotham FC 1. Esther Gonz\u00e1lez (Gotham FC) header from the centre of the box to the bottom right corner. Assisted by Yazmeen Ryan with a cross."
+   },
+   {
+    "id": "44220720",
+    "clock": {
+     "value": 3854.0,
+     "displayValue": "65'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "328199",
+       "displayName": "Bruninha",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "245160",
+       "displayName": "Mandy Freeman",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Gotham FC. Bruninha replaces Mandy Freeman because of an injury."
+   },
+   {
+    "id": "44220746",
+    "clock": {
+     "value": 3978.0,
+     "displayValue": "67'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15365",
+     "displayName": "Washington Spirit"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "307452",
+       "displayName": "Makenna Morris",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "316914",
+       "displayName": "Heather Stainbrook",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Washington Spirit. Makenna Morris replaces Heather Stainbrook."
+   },
+   {
+    "id": "44220805",
+    "clock": {
+     "value": 4300.0,
+     "displayValue": "72'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "94",
+     "text": "Yellow Card",
+     "type": "yellow-card"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "328199",
+       "displayName": "Bruninha",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Bruninha (Gotham FC) is shown the yellow card for a bad foul."
+   },
+   {
+    "id": "44220806",
+    "clock": {
+     "value": 4314.0,
+     "displayValue": "72'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "211968",
+       "displayName": "Lynn Biyendolo",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "242965",
+       "displayName": "Ella Stevens",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Gotham FC. Lynn Williams replaces Ella Stevens because of an injury."
+   },
+   {
+    "id": "44220882",
+    "clock": {
+     "value": 4700.0,
+     "displayValue": "79'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15365",
+     "displayName": "Washington Spirit"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "279478",
+       "displayName": "Lena Silano",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "219866",
+       "displayName": "Leicy Santos",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Washington Spirit. Lena Silano replaces Leicy Santos."
+   },
+   {
+    "id": "44220883",
+    "clock": {
+     "value": 4702.0,
+     "displayValue": "79'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15365",
+     "displayName": "Washington Spirit"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "235713",
+       "displayName": "Gabrielle Carle",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "360895",
+       "displayName": "Paige Metayer",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Washington Spirit. Gabrielle Carle replaces Paige Metayer."
+   },
+   {
+    "id": "44220903",
+    "clock": {
+     "value": 4871.0,
+     "displayValue": "82'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "267389",
+       "displayName": "McCall Zerboni",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "279307",
+       "displayName": "Delanie Sheehan",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Gotham FC. McCall Zerboni replaces Delanie Sheehan."
+   },
+   {
+    "id": "44220985",
+    "clock": {
+     "value": 5323.0,
+     "displayValue": "89'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15365",
+     "displayName": "Washington Spirit"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "211049",
+       "displayName": "Brittany Ratcliffe",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "347222",
+       "displayName": "Rosemonde Kouassi",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Washington Spirit. Brittany Ratcliffe replaces Rosemonde Kouassi."
+   },
+   {
+    "id": "44221014",
+    "clock": {
+     "value": 5400.0,
+     "displayValue": "90'+2'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "94",
+     "text": "Yellow Card",
+     "type": "yellow-card"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "292633",
+       "displayName": "Jenna Nighswonger",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Jenna Nighswonger (Gotham FC) is shown the yellow card for a bad foul."
+   },
+   {
+    "id": "44221016",
+    "clock": {
+     "value": 5400.0,
+     "displayValue": "90'+3'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": true,
+    "shootout": false,
+    "type": {
+     "id": "137",
+     "text": "Goal - Header",
+     "type": "goal---header"
+    },
+    "team": {
+     "id": "15365",
+     "displayName": "Washington Spirit"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "292603",
+       "displayName": "Hal Hershfelt",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "307452",
+       "displayName": "Makenna Morris",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Goal! Washington Spirit 1, Gotham FC 1. Hal Hershfelt (Washington Spirit) header from the centre of the box to the bottom left corner. Assisted by Makenna Morris with a cross following a set piece situation."
+   },
+   {
+    "id": "44221041",
+    "clock": {
+     "value": 5400.0,
+     "displayValue": "90'+9'"
+    },
+    "period": {
+     "number": 2
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "83",
+     "text": "End Regular Time",
+     "type": "end-regular-time"
+    },
+    "team": null,
+    "participants": [],
+    "text": null
+   },
+   {
+    "id": "44221054",
+    "clock": {
+     "value": 5400.0,
+     "displayValue": "90'"
+    },
+    "period": {
+     "number": 3
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "259780",
+       "displayName": "J\u00e9ssica Silva",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "263902",
+       "displayName": "Yazmeen Ryan",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Gotham FC. J\u00e9ssica Silva replaces Yazmeen Ryan."
+   },
+   {
+    "id": "44221055",
+    "clock": {
+     "value": 5400.0,
+     "displayValue": "90'"
+    },
+    "period": {
+     "number": 3
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "290278",
+       "displayName": "Cece Delzer",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "209984",
+       "displayName": "Rose Lavelle",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Gotham FC. Cece Kizer replaces Rose Lavelle."
+   },
+   {
+    "id": "44221056",
+    "clock": {
+     "value": 5400.0,
+     "displayValue": "90'"
+    },
+    "period": {
+     "number": 3
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "84",
+     "text": "Start Extra Time",
+     "type": "start-extra-time"
+    },
+    "team": null,
+    "participants": [],
+    "text": null
+   },
+   {
+    "id": "44221086",
+    "clock": {
+     "value": 5781.0,
+     "displayValue": "97'"
+    },
+    "period": {
+     "number": 3
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "94",
+     "text": "Yellow Card",
+     "type": "yellow-card"
+    },
+    "team": {
+     "id": "15365",
+     "displayName": "Washington Spirit"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "248778",
+       "displayName": "Casey Krueger",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Casey Krueger (Washington Spirit) is shown the yellow card for a bad foul."
+   },
+   {
+    "id": "44221103",
+    "clock": {
+     "value": 6033.0,
+     "displayValue": "101'"
+    },
+    "period": {
+     "number": 3
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "93",
+     "text": "Red Card",
+     "type": "red-card"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "328199",
+       "displayName": "Bruninha",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Second yellow card to Bruninha (Gotham FC) for a bad foul."
+   },
+   {
+    "id": "44221106",
+    "clock": {
+     "value": 6104.0,
+     "displayValue": "102'"
+    },
+    "period": {
+     "number": 3
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "94",
+     "text": "Yellow Card",
+     "type": "yellow-card"
+    },
+    "team": {
+     "id": "15365",
+     "displayName": "Washington Spirit"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "317423",
+       "displayName": "Trinity Rodman",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Trinity Rodman (Washington Spirit) is shown the yellow card."
+   },
+   {
+    "id": "44221124",
+    "clock": {
+     "value": 6300.0,
+     "displayValue": "105'+5'"
+    },
+    "period": {
+     "number": 3
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "85",
+     "text": "Halftime Extra Time",
+     "type": "halftime-extra-time"
+    },
+    "team": null,
+    "participants": [],
+    "text": "First Half Extra Time ends, Washington Spirit 1, Gotham FC 1."
+   },
+   {
+    "id": "44221126",
+    "clock": {
+     "value": 6300.0,
+     "displayValue": "105'"
+    },
+    "period": {
+     "number": 4
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "86",
+     "text": "Start 2nd Half Extra Time",
+     "type": "start-2nd-half-extra-time"
+    },
+    "team": null,
+    "participants": [],
+    "text": "Second Half Extra Time begins Washington Spirit 1, Gotham FC 1."
+   },
+   {
+    "id": "44221127",
+    "clock": {
+     "value": 6300.0,
+     "displayValue": "105'"
+    },
+    "period": {
+     "number": 4
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "76",
+     "text": "Substitution",
+     "type": "substitution"
+    },
+    "team": {
+     "id": "15365",
+     "displayName": "Washington Spirit"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "219935",
+       "displayName": "Anna\u00efg Butel",
+       "shortName": null,
+       "jersey": null
+      }
+     },
+     {
+      "athlete": {
+       "id": "311198",
+       "displayName": "Esme Morgan",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "Substitution, Washington Spirit. Anna\u00efg Butel replaces Esme Morgan."
+   },
+   {
+    "id": "44221170",
+    "clock": {
+     "value": 6922.0,
+     "displayValue": "116'"
+    },
+    "period": {
+     "number": 4
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "94",
+     "text": "Yellow Card",
+     "type": "yellow-card"
+    },
+    "team": {
+     "id": "15364",
+     "displayName": "Gotham FC"
+    },
+    "participants": [
+     {
+      "athlete": {
+       "id": "267389",
+       "displayName": "McCall Zerboni",
+       "shortName": null,
+       "jersey": null
+      }
+     }
+    ],
+    "text": "McCall Zerboni (Gotham FC) is shown the yellow card for a bad foul."
+   },
+   {
+    "id": "44221212",
+    "clock": {
+     "value": 7200.0,
+     "displayValue": "120'+1'"
+    },
+    "period": {
+     "number": 4
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "87",
+     "text": "End Extra Time",
+     "type": "end-extra-time"
+    },
+    "team": null,
+    "participants": [],
+    "text": "Second Half Extra Time ends, Washington Spirit 1, Gotham FC 1."
+   },
+   {
+    "id": "44221244",
+    "clock": {
+     "value": 7200.0,
+     "displayValue": "120'"
+    },
+    "period": {
+     "number": 5
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "88",
+     "text": "Start Shootout",
+     "type": "start-shootout"
+    },
+    "team": null,
+    "participants": [],
+    "text": null
+   },
+   {
+    "id": "44221269",
+    "clock": {
+     "value": 7200.0,
+     "displayValue": "120'"
+    },
+    "period": {
+     "number": 5
+    },
+    "scoringPlay": false,
+    "shootout": false,
+    "type": {
+     "id": "89",
+     "text": "End Match",
+     "type": "end-match"
+    },
+    "team": null,
+    "participants": [],
+    "text": "Penalty Shootout ends, Washington Spirit 1(3), Gotham FC 1."
+   }
+  ],
+  "shootout": [
+   {
+    "id": "15364",
+    "team": "Gotham FC",
+    "shots": [
+     {
+      "id": "44221250",
+      "playerId": "259791",
+      "player": "Esther Gonz\u00e1lez",
+      "shotNumber": 1,
+      "didScore": false
+     },
+     {
+      "id": "44221255",
+      "playerId": "267389",
+      "player": "McCall Zerboni",
+      "shotNumber": 2,
+      "didScore": false
+     },
+     {
+      "id": "44221263",
+      "playerId": "292633",
+      "player": "Jenna Nighswonger",
+      "shotNumber": 3,
+      "didScore": false
+     }
+    ]
+   },
+   {
+    "id": "15365",
+    "team": "Washington Spirit",
+    "shots": [
+     {
+      "id": "44221245",
+      "playerId": "210318",
+      "player": "Ashley Hatch",
+      "shotNumber": 1,
+      "didScore": true
+     },
+     {
+      "id": "44221251",
+      "playerId": "279478",
+      "player": "Lena Silano",
+      "shotNumber": 2,
+      "didScore": true
+     },
+     {
+      "id": "44221256",
+      "playerId": "263690",
+      "player": "Tara Rudd",
+      "shotNumber": 3,
+      "didScore": true
+     }
+    ]
+   }
+  ],
+  "commentary": []
+ }
+}

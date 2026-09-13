@@ -33,8 +33,16 @@ export interface ScoreboardEvent {
 		competitors?: Array<{
 			homeAway?: string;
 			score?: string; // ESPN sends the score as a String ("0"), not a number.
+			/** Penalty-shootout tally — a NUMBER (Int on the scoreboard, Double in the summary header), and the
+			 *  key is ABSENT unless the match went to pens. `score` stays the 120' score (verified on the 2024 NWSL
+			 *  semifinal 712961: score "1"/"1", shootoutScore 3/0). `winner`/`advance` are set on the pens winner. */
+			shootoutScore?: number | string;
+			winner?: boolean;
+			advance?: boolean;
 			team?: { id?: string; abbreviation?: string; displayName?: string };
 		}>;
+		/** Knockout-only human string, e.g. "Washington Spirit advance 3-0 on penalties" (not read; noted). */
+		notes?: Array<{ text?: string }>;
 		// Scoring plays + cards live here (no subs — those need /summary, Stage D).
 		details?: Array<ScoreboardDetail>;
 		// Venue + broadcast ride the SAME scoreboard payload (mirrors the app's Scoreboard.swift):
@@ -54,6 +62,11 @@ export interface ScoreboardDetail {
 	yellowCard?: boolean;
 	ownGoal?: boolean;
 	penaltyKick?: boolean;
+	/** True on a penalty-SHOOTOUT kick. ⚠️ Scored kicks arrive as `scoringPlay:true, penaltyKick:true,
+	 *  type:{id:"104", text:"Penalty - Scored"}, clock "120'"` — the same `type.text` as an in-play penalty goal
+	 *  (id "98", shootout:false); ONLY this boolean separates a kick from a goal (verified on 712961). Saved/missed
+	 *  kicks never appear here at all. A kick is not a goal: it must not enter `plays`. */
+	shootout?: boolean;
 	type?: { id?: string; text?: string };
 	clock?: { displayValue?: string }; // e.g. "67'"
 	team?: { id?: string };
@@ -65,7 +78,9 @@ interface EventStatus {
 	clock?: number; // seconds elapsed
 	// `completed` is ESPN's own "did this actually finish" flag and the ONLY reliable way to tell a
 	// FULL-TIME `post` from a SUSPENDED one (device-proven 2026-07-29 — see `isUnfinishedPost`).
-	type?: { state?: string; name?: string; completed?: boolean }; // state: pre|in|post; name: STATUS_*
+	// `shortDetail` is ESPN's own final label: "FT" / "AET" (STATUS_FINAL_AET, id 45, period 4) / "FT-Pens"
+	// (STATUS_FINAL_PEN, id 47, period 5). Period map: 1 H1 · 2 H2 · 3 ET1 · 4 ET2 · 5 SHOOTOUT.
+	type?: { state?: string; name?: string; completed?: boolean; shortDetail?: string }; // state: pre|in|post; name: STATUS_*
 }
 
 /** A scoring play reduced to what the card/copy need (best-effort — ESPN may omit). Sourced from the
@@ -91,7 +106,12 @@ export interface Side {
 	id: string;
 	abbr: string;
 	name: string;
+	/** The 90'/120' score — NEVER includes shootout kicks (ESPN keeps them apart, so do we). */
 	score: number;
+	/** Penalty-shootout tally; undefined unless the match went to pens (knockouts only). */
+	pens?: number;
+	/** ESPN's `winner` flag — the ONLY truthful "who went through" on a level scoreline after pens. */
+	winner?: boolean;
 }
 
 /** A match reduced to what we need to detect + describe events. */
@@ -101,6 +121,8 @@ export interface Match {
 	away: Side;
 	state: string; // "in" | "post"
 	statusName: string; // STATUS_*
+	/** ESPN's short status label ("FT", "AET", "FT-Pens") — read only for the AET full-time suffix. */
+	statusDetail?: string;
 	period: number;
 	clock: number;
 	/** Scoring plays from the scoreboard details, in document order. */
@@ -203,6 +225,15 @@ export interface MatchEvent {
 function toScore(raw?: string): number {
 	const n = parseInt(raw ?? "0", 10);
 	return Number.isFinite(n) ? n : 0;
+}
+
+/** `shootoutScore` → tally, or undefined when the key is absent/unparseable (= no shootout). Unlike `toScore`
+ *  this must NOT default to 0: a present-but-zero tally ("lost 3–0 on pens") is real, an absent one means the
+ *  match never went to pens. Tolerates ESPN's Int / Double / String variants. */
+function toPens(raw?: number | string): number | undefined {
+	if (raw == null || raw === "") return undefined;
+	const n = typeof raw === "number" ? raw : parseFloat(raw);
+	return Number.isFinite(n) ? Math.trunc(n) : undefined;
 }
 
 function escapeRegExp(s: string): string {
@@ -407,6 +438,10 @@ function parsePlays(details?: ScoreboardDetail[]): ScoringPlay[] {
 	const plays: ScoringPlay[] = [];
 	for (const d of details ?? []) {
 		if (!d.scoringPlay || !d.team?.id) continue;
+		// A shootout kick is flagged `scoringPlay:true` too (712961: three "Penalty - Scored" at 120'). It is NOT a
+		// goal — the competitor `score` never counts it — so it must not become a "A. Hatch 120'" scorer line on
+		// the Live Activity or pad the N-th-goal play pool. Mirrors `summaryScoringPlays`.
+		if (d.shootout === true) continue;
 		const athlete = d.athletesInvolved?.[0];
 		plays.push({
 			teamId: d.team.id,
@@ -496,6 +531,8 @@ export function parseMatch(event: ScoreboardEvent): Match | null {
 		abbr: c.team!.abbreviation ?? "",
 		name: c.team!.displayName ?? c.team!.abbreviation ?? "",
 		score: toScore(c.score),
+		pens: toPens(c.shootoutScore),
+		winner: c.winner === true || undefined,
 	});
 
 	return {
@@ -505,6 +542,7 @@ export function parseMatch(event: ScoreboardEvent): Match | null {
 		away: side(away),
 		state,
 		statusName: status?.type?.name ?? "",
+		statusDetail: status?.type?.shortDetail || undefined,
 		period: status?.period ?? 0,
 		clock: status?.clock ?? 0,
 		plays: parsePlays(competition?.details),
@@ -537,8 +575,30 @@ function nextRedCards(_prev: StoredState | null, match: Match): { home: number; 
  *  the period-change re-base fires at the REAL second-half kickoff and absorbs the break. */
 export function clockRunning(m: Match): boolean {
 	if (m.state !== "in") return false;
+	// Period 5 = the shootout (verified field; ESPN's LIVE mid-shootout status NAME is unverified, so the
+	// name check below is belt, the period is the braces — clock is frozen at 120' throughout).
+	if (m.period >= 5) return false;
 	const n = m.statusName.toUpperCase();
 	return !n.includes("HALFTIME") && !n.includes("SHOOTOUT") && !n.includes("PENALT");
+}
+
+/** True once a shootout has been recorded on either side (the `shootoutScore` key exists). */
+export function wentToPens(m: Match): boolean {
+	return m.home.pens != null || m.away.pens != null;
+}
+
+/** The side that went through — ESPN's `winner` flag first (authoritative on a level scoreline after pens),
+ *  then the pens tally, then the scoreline. Undefined on a genuine draw (regular season). */
+export function winnerSideOf(m: Match): "home" | "away" | undefined {
+	if (m.home.winner && !m.away.winner) return "home";
+	if (m.away.winner && !m.home.winner) return "away";
+	if (wentToPens(m)) {
+		const h = m.home.pens ?? 0;
+		const a = m.away.pens ?? 0;
+		if (h !== a) return h > a ? "home" : "away";
+	}
+	if (m.home.score !== m.away.score) return m.home.score > m.away.score ? "home" : "away";
+	return undefined;
 }
 
 /** How far EARLIER (sec) a same-period candidate may move the anchor before we call it a feed
@@ -609,6 +669,23 @@ export function lineupsPublished(summary: SummaryLike | null | undefined): boole
 // "WAS 1–0 ORL"
 function scoreline(match: Match): string {
 	return `${match.home.abbr} ${match.home.score}–${match.away.score} ${match.away.abbr}`;
+}
+
+/** Full-time line 2. Regular season: the bare scoreline (v4). Knockouts: pens → "WAS 1–1 GFC · WAS win 3–0 on pens"
+ *  (winner-first tally, so the number reads as THEIR result); ET win without pens → "ENG 2–1 ITA (AET)". Keys on
+ *  the VERIFIED fields only — `shootoutScore` present ⇒ pens happened; `period === 4` / shortDetail "AET" ⇒ extra
+ *  time — never on a guessed status name. Two-team context ⇒ abbreviations throughout. */
+export function fulltimeSubtitle(match: Match): string {
+	const score = scoreline(match);
+	if (wentToPens(match)) {
+		const w = winnerSideOf(match);
+		if (!w) return `${score} · pens`; // tally missing/level — can't name a winner truthfully; still not "a draw"
+		const win = w === "home" ? match.home : match.away;
+		const lose = w === "home" ? match.away : match.home;
+		return `${score} · ${win.abbr} win ${win.pens ?? 0}–${lose.pens ?? 0} on pens`;
+	}
+	const aet = match.period === 4 || match.statusDetail?.toUpperCase() === "AET";
+	return aet ? `${score} (AET)` : score;
 }
 
 // "WAS vs ORL" — the pre-score matchup form (kickoff/lineups).
@@ -753,9 +830,10 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 	// ⚠️ `!match.unfinishedPost` — a lightning suspension reports `post` mid-match, and firing here
 	// sent a false FULL TIME at 27' (2026-07-29).
 	if (prev && prev.state === "in" && match.state === "post" && !match.unfinishedPost) {
-		const winnerSide = match.home.score > match.away.score ? "home" : match.away.score > match.home.score ? "away" : undefined;
 		// v4: scoreline ONLY — no "…win" / "It's a draw" tail. (winnerSide still picks the crest.)
-		events.push({ ...base, type: "fulltime", prefColumn: "full_time", title: "Full time", subtitle: scoreline(match), scoringSide: winnerSide });
+		// Knockouts (2026-09-13): a level 120' score decided on pens is NOT a draw — the tail names the side that
+		// went through + the tally ("WAS 1–1 GFC · WAS win 3–0 on pens"); an ET win keeps the scoreline + "(AET)".
+		events.push({ ...base, type: "fulltime", prefColumn: "full_time", title: "Full time", subtitle: fulltimeSubtitle(match), scoringSide: winnerSideOf(match) });
 	}
 
 	return events;
