@@ -1,0 +1,848 @@
+{
+ "_source": "ESPN via nwslapp-proxy, captured 2026-09-13T00:31Z at 89' (SD 2-1 NC, event 401853999); trimmed to the fields the watcher reads",
+ "eventId": "401853999",
+ "competitors": [
+  {
+   "homeAway": "home",
+   "score": "2",
+   "team": {
+    "id": "21423",
+    "abbreviation": "SD",
+    "displayName": "San Diego Wave FC",
+    "shortDisplayName": "San Diego",
+    "name": "San Diego Wave FC"
+   }
+  },
+  {
+   "homeAway": "away",
+   "score": "1",
+   "team": {
+    "id": "15366",
+    "abbreviation": "NC",
+    "displayName": "North Carolina Courage",
+    "shortDisplayName": "North Carolina",
+    "name": "North Carolina Courage"
+   }
+  }
+ ],
+ "details": [
+  {
+   "clock": {
+    "value": 1337.0,
+    "displayValue": "23'"
+   },
+   "team": {
+    "id": "21423"
+   },
+   "scoringPlay": true,
+   "ownGoal": false,
+   "penaltyKick": false,
+   "redCard": false,
+   "yellowCard": false,
+   "type": {
+    "id": "70",
+    "text": "Goal"
+   },
+   "athletesInvolved": [
+    {
+     "id": "306037",
+     "displayName": "Gia Corley",
+     "shortName": "G. Corley",
+     "jersey": "11"
+    }
+   ]
+  },
+  {
+   "clock": {
+    "value": 2619.0,
+    "displayValue": "44'"
+   },
+   "team": {
+    "id": "15366"
+   },
+   "scoringPlay": false,
+   "ownGoal": false,
+   "penaltyKick": false,
+   "redCard": false,
+   "yellowCard": true,
+   "type": {
+    "id": "94",
+    "text": "Yellow Card"
+   },
+   "athletesInvolved": [
+    {
+     "id": "348614",
+     "displayName": "Chioma Okafor",
+     "shortName": "C. Okafor",
+     "jersey": "8"
+    }
+   ]
+  },
+  {
+   "clock": {
+    "value": 4295.0,
+    "displayValue": "72'"
+   },
+   "team": {
+    "id": "21423"
+   },
+   "scoringPlay": true,
+   "ownGoal": false,
+   "penaltyKick": false,
+   "redCard": false,
+   "yellowCard": false,
+   "type": {
+    "id": "70",
+    "text": "Goal"
+   },
+   "athletesInvolved": [
+    {
+     "id": "360902",
+     "displayName": "Melanie Barcenas",
+     "shortName": "M. Barcenas",
+     "jersey": "7"
+    }
+   ]
+  },
+  {
+   "clock": {
+    "value": 4914.0,
+    "displayValue": "82'"
+   },
+   "team": {
+    "id": "15366"
+   },
+   "scoringPlay": true,
+   "ownGoal": false,
+   "penaltyKick": false,
+   "redCard": false,
+   "yellowCard": false,
+   "type": {
+    "id": "70",
+    "text": "Goal"
+   },
+   "athletesInvolved": [
+    {
+     "id": "279297",
+     "displayName": "Ashley Sanchez",
+     "shortName": "A. Sanchez",
+     "jersey": "2"
+    }
+   ]
+  }
+ ],
+ "keyEvents": [
+  {
+   "id": "52302734",
+   "clock": {
+    "value": 0.0,
+    "displayValue": ""
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "80",
+    "text": "Kickoff",
+    "type": "kickoff"
+   },
+   "team": null,
+   "participants": [],
+   "text": null
+  },
+  {
+   "id": "52303773",
+   "clock": {
+    "value": 1337.0,
+    "displayValue": "23'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": true,
+   "shootout": false,
+   "type": {
+    "id": "70",
+    "text": "Goal",
+    "type": "goal"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [
+    {
+     "athlete": {
+      "id": "306037",
+      "displayName": "Gia Corley",
+      "shortName": null,
+      "jersey": null
+     }
+    }
+   ],
+   "text": "Goal! San Diego Wave 1, North Carolina Courage 0. Gia Corley (San Diego Wave) right footed shot from the centre of the box to the bottom right corner."
+  },
+  {
+   "id": "52303952",
+   "clock": {
+    "value": 1600.0,
+    "displayValue": "27'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "129",
+    "text": "Start Delay",
+    "type": "start-delay"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [],
+   "text": "Delay in match (San Diego Wave)."
+  },
+  {
+   "id": "52303951",
+   "clock": {
+    "value": 1600.0,
+    "displayValue": "27'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "129",
+    "text": "Start Delay",
+    "type": "start-delay"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [],
+   "text": null
+  },
+  {
+   "id": "52303954",
+   "clock": {
+    "value": 1604.0,
+    "displayValue": "27'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "130",
+    "text": "End Delay",
+    "type": "end-delay"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [],
+   "text": "Delay over. They are ready to continue."
+  },
+  {
+   "id": "52303953",
+   "clock": {
+    "value": 1604.0,
+    "displayValue": "27'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "130",
+    "text": "End Delay",
+    "type": "end-delay"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [],
+   "text": null
+  },
+  {
+   "id": "52304231",
+   "clock": {
+    "value": 1859.0,
+    "displayValue": "31'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "129",
+    "text": "Start Delay",
+    "type": "start-delay"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [],
+   "text": "Delay in match for a drinks break."
+  },
+  {
+   "id": "52304230",
+   "clock": {
+    "value": 1859.0,
+    "displayValue": "31'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "129",
+    "text": "Start Delay",
+    "type": "start-delay"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [],
+   "text": null
+  },
+  {
+   "id": "52304232",
+   "clock": {
+    "value": 1881.0,
+    "displayValue": "32'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "130",
+    "text": "End Delay",
+    "type": "end-delay"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [],
+   "text": null
+  },
+  {
+   "id": "52304330",
+   "clock": {
+    "value": 1881.0,
+    "displayValue": "32'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "130",
+    "text": "End Delay",
+    "type": "end-delay"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [],
+   "text": "Delay over. They are ready to continue."
+  },
+  {
+   "id": "52305293",
+   "clock": {
+    "value": 2619.0,
+    "displayValue": "44'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "94",
+    "text": "Yellow Card",
+    "type": "yellow-card"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [
+    {
+     "athlete": {
+      "id": "348614",
+      "displayName": "Chioma Okafor",
+      "shortName": null,
+      "jersey": null
+     }
+    }
+   ],
+   "text": "Chioma Okafor (North Carolina Courage) is shown the yellow card for a bad foul."
+  },
+  {
+   "id": "52305642",
+   "clock": {
+    "value": 2700.0,
+    "displayValue": "45'+5'"
+   },
+   "period": {
+    "number": 1
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "81",
+    "text": "Halftime",
+    "type": "halftime"
+   },
+   "team": null,
+   "participants": [],
+   "text": null
+  },
+  {
+   "id": "52306743",
+   "clock": {
+    "value": 2700.0,
+    "displayValue": "45'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "82",
+    "text": "Start 2nd Half",
+    "type": "start-2nd-half"
+   },
+   "team": null,
+   "participants": [],
+   "text": null
+  },
+  {
+   "id": "52309324",
+   "clock": {
+    "value": 3730.0,
+    "displayValue": "63'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "76",
+    "text": "Substitution",
+    "type": "substitution"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [
+    {
+     "athlete": {
+      "id": "362169",
+      "displayName": "Laila Harbert",
+      "shortName": null,
+      "jersey": null
+     }
+    },
+    {
+     "athlete": {
+      "id": "306037",
+      "displayName": "Gia Corley",
+      "shortName": null,
+      "jersey": null
+     }
+    }
+   ],
+   "text": "Substitution, San Diego Wave. Laila Harbert replaces Gia Corley."
+  },
+  {
+   "id": "52309323",
+   "clock": {
+    "value": 3742.0,
+    "displayValue": "63'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "76",
+    "text": "Substitution",
+    "type": "substitution"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [
+    {
+     "athlete": {
+      "id": "225706",
+      "displayName": "Carly Wickenheiser",
+      "shortName": null,
+      "jersey": null
+     }
+    },
+    {
+     "athlete": {
+      "id": "348614",
+      "displayName": "Chioma Okafor",
+      "shortName": null,
+      "jersey": null
+     }
+    }
+   ],
+   "text": "Substitution, North Carolina Courage. Carly Wickenheiser replaces Chioma Okafor."
+  },
+  {
+   "id": "52310486",
+   "clock": {
+    "value": 4295.0,
+    "displayValue": "72'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": true,
+   "shootout": false,
+   "type": {
+    "id": "70",
+    "text": "Goal",
+    "type": "goal"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [
+    {
+     "athlete": {
+      "id": "360902",
+      "displayName": "Melanie Barcenas",
+      "shortName": null,
+      "jersey": null
+     }
+    }
+   ],
+   "text": "Goal! San Diego Wave 2, North Carolina Courage 0. Melanie Barcenas (San Diego Wave) left footed shot from the centre of the box to the bottom left corner."
+  },
+  {
+   "id": "52310591",
+   "clock": {
+    "value": 4404.0,
+    "displayValue": "74'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "129",
+    "text": "Start Delay",
+    "type": "start-delay"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [],
+   "text": "Delay in match for a drinks break."
+  },
+  {
+   "id": "52310590",
+   "clock": {
+    "value": 4404.0,
+    "displayValue": "74'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "129",
+    "text": "Start Delay",
+    "type": "start-delay"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [],
+   "text": null
+  },
+  {
+   "id": "52310934",
+   "clock": {
+    "value": 4475.0,
+    "displayValue": "75'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "130",
+    "text": "End Delay",
+    "type": "end-delay"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [],
+   "text": null
+  },
+  {
+   "id": "52310936",
+   "clock": {
+    "value": 4539.0,
+    "displayValue": "76'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "130",
+    "text": "End Delay",
+    "type": "end-delay"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [],
+   "text": "Delay over. They are ready to continue."
+  },
+  {
+   "id": "52311590",
+   "clock": {
+    "value": 4809.0,
+    "displayValue": "81'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "76",
+    "text": "Substitution",
+    "type": "substitution"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [
+    {
+     "athlete": {
+      "id": "306044",
+      "displayName": "Laurina Fazer",
+      "shortName": null,
+      "jersey": null
+     }
+    },
+    {
+     "athlete": {
+      "id": "382797",
+      "displayName": "Kimmi Ascanio",
+      "shortName": null,
+      "jersey": null
+     }
+    }
+   ],
+   "text": "Substitution, San Diego Wave. Laurina Fazer replaces Kimmi Ascanio."
+  },
+  {
+   "id": "52311886",
+   "clock": {
+    "value": 4810.0,
+    "displayValue": "81'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "76",
+    "text": "Substitution",
+    "type": "substitution"
+   },
+   "team": {
+    "id": "21423",
+    "displayName": "San Diego Wave FC"
+   },
+   "participants": [
+    {
+     "athlete": {
+      "id": "219769",
+      "displayName": "Adriana Leon",
+      "shortName": null,
+      "jersey": null
+     }
+    },
+    {
+     "athlete": {
+      "id": "327571",
+      "displayName": "Trinity Byars",
+      "shortName": null,
+      "jersey": null
+     }
+    }
+   ],
+   "text": "Substitution, San Diego Wave. Adriana Leon replaces Trinity Byars."
+  },
+  {
+   "id": "52311887",
+   "clock": {
+    "value": 4832.0,
+    "displayValue": "81'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "76",
+    "text": "Substitution",
+    "type": "substitution"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [
+    {
+     "athlete": {
+      "id": "3139567",
+      "displayName": "Ana Beatriz Gomes Lopes",
+      "shortName": null,
+      "jersey": null
+     }
+    },
+    {
+     "athlete": {
+      "id": "252363",
+      "displayName": "Vilde B\u00f8e Risa",
+      "shortName": null,
+      "jersey": null
+     }
+    }
+   ],
+   "text": "Substitution, North Carolina Courage. Bia Gomes replaces Vilde B\u00f8e Risa."
+  },
+  {
+   "id": "52311888",
+   "clock": {
+    "value": 4844.0,
+    "displayValue": "81'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": false,
+   "shootout": false,
+   "type": {
+    "id": "76",
+    "text": "Substitution",
+    "type": "substitution"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [
+    {
+     "athlete": {
+      "id": "230877",
+      "displayName": "Dani Weatherholt",
+      "shortName": null,
+      "jersey": null
+     }
+    },
+    {
+     "athlete": {
+      "id": "231205",
+      "displayName": "Feli Rauch",
+      "shortName": null,
+      "jersey": null
+     }
+    }
+   ],
+   "text": "Substitution, North Carolina Courage. Dani Weatherholt replaces Feli Rauch."
+  },
+  {
+   "id": "52311969",
+   "clock": {
+    "value": 4914.0,
+    "displayValue": "82'"
+   },
+   "period": {
+    "number": 2
+   },
+   "scoringPlay": true,
+   "shootout": false,
+   "type": {
+    "id": "70",
+    "text": "Goal",
+    "type": "goal"
+   },
+   "team": {
+    "id": "15366",
+    "displayName": "North Carolina Courage"
+   },
+   "participants": [
+    {
+     "athlete": {
+      "id": "279297",
+      "displayName": "Ashley Sanchez",
+      "shortName": null,
+      "jersey": null
+     }
+    },
+    {
+     "athlete": {
+      "id": "351354",
+      "displayName": "Shinomi Koyama",
+      "shortName": null,
+      "jersey": null
+     }
+    }
+   ],
+   "text": "Goal! San Diego Wave 2, North Carolina Courage 1. Ashley Sanchez (North Carolina Courage) right footed shot from the left side of the box to the top right corner. Assisted by Shinomi Koyama."
+  }
+ ]
+}

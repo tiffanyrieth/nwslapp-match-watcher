@@ -52,10 +52,12 @@ export interface ScoreboardDetail {
 	scoringPlay?: boolean;
 	redCard?: boolean;
 	yellowCard?: boolean;
+	ownGoal?: boolean;
+	penaltyKick?: boolean;
 	type?: { id?: string; text?: string };
 	clock?: { displayValue?: string }; // e.g. "67'"
 	team?: { id?: string };
-	athletesInvolved?: Array<{ displayName?: string; shortName?: string }>;
+	athletesInvolved?: Array<{ id?: string; displayName?: string; shortName?: string }>;
 }
 
 interface EventStatus {
@@ -66,13 +68,22 @@ interface EventStatus {
 	type?: { state?: string; name?: string; completed?: boolean }; // state: pre|in|post; name: STATUS_*
 }
 
-/** A scoring play reduced to what the card/copy need (best-effort — ESPN may omit). */
+/** A scoring play reduced to what the card/copy need (best-effort — ESPN may omit). Sourced from the
+ *  scoreboard `details` AND, since 2026-09-12, /summary `keyEvents` (merged — see `mergePlays`): the
+ *  scoreboard's play list LAGS its own score by minutes, which is what put the previous goal's scorer on a
+ *  new goal's push. `teamId` is always the CREDITED side (an own goal credits the benefiting team). */
 export interface ScoringPlay {
 	teamId: string;
 	/** Short scorer name, e.g. "S. Smith" — undefined if ESPN didn't attribute it. */
 	scorer?: string;
 	/** Match minute, e.g. 67 — undefined if no clock on the play. */
 	minute?: number;
+	/** ESPN athlete id — lets a summary play and a scoreboard play for the same goal be recognised as one. */
+	athleteId?: string;
+	/** Own goal: `scorer` plays for the OTHER side; rendered "Name (OG) 67'" (owner copy call 2026-09-12). */
+	isOwnGoal?: boolean;
+	/** Penalty: informational only for now (plain name; no suffix). */
+	isPenalty?: boolean;
 }
 
 /** One side of a parsed match. */
@@ -240,6 +251,147 @@ export function summaryGoalScore(
 	return home === null || away === null ? null : { home, away };
 }
 
+/** "Melanie Barcenas" → "M. Barcenas" (ESPN's own shortName convention: first initial + the rest).
+ *  Single-token names pass through. Used only when a summary play has no shortName of its own. */
+export function shortForm(displayName: string): string {
+	const parts = displayName.trim().split(/\s+/).filter(Boolean);
+	if (parts.length < 2) return displayName.trim();
+	return `${parts[0][0]}. ${parts.slice(1).join(" ")}`;
+}
+
+/**
+ * Scoring plays from ESPN's /summary `keyEvents` — the TIMELY feed (the app's play-by-play reads it; it
+ * showed "72' Melanie Barcenas" while the scoreboard's `details` still listed only the 23' goal, 2026-09-12).
+ * Zero extra requests: #44 already fetches + parses this payload for every live match on every poll.
+ *
+ * Per goal entry (`scoringPlay === true`, a goal-type `type`, not a shootout): scorer = `participants[0]`
+ * (participants[1+] are assists — verified on the SD–NC 82' entry), minute from `clock.displayValue`,
+ * flags from `type` ("own-goal" id 97 / "Goal - Penalty" id 98).
+ *
+ * CREDITED SIDE = the side whose running score ROSE in the narrative `text` ("Goal! San Diego Wave 2, North
+ * Carolina Courage 0. …") — the same OWN-GOAL-SAFE method `summaryGoalScore` uses: ESPN's `team` on an own goal
+ * is ambiguous, but the stated score never is. Entries are walked in clock order so the running delta is
+ * well-defined. Fallback when the narrative doesn't parse: `team.id`, flipped for an own goal.
+ * Returns [] on anything unexpected (caller keeps the scoreboard plays — no regression).
+ */
+export function summaryScoringPlays(keyEvents: unknown, home: Side, away: Side): ScoringPlay[] {
+	if (!Array.isArray(keyEvents) || !home?.id || !away?.id) return [];
+	type KE = {
+		scoringPlay?: boolean;
+		shootout?: boolean;
+		type?: { id?: string; type?: string; text?: string };
+		text?: string;
+		clock?: { value?: number; displayValue?: string };
+		team?: { id?: string };
+		participants?: Array<{ athlete?: { id?: string; displayName?: string; shortName?: string | null } }>;
+	};
+	const goals: KE[] = [];
+	for (const raw of keyEvents) {
+		const e = raw as KE;
+		const kind = `${e?.type?.type ?? ""} ${e?.type?.text ?? ""}`.toLowerCase();
+		if (!e?.scoringPlay || e.shootout === true || !kind.includes("goal")) continue;
+		goals.push(e);
+	}
+	// Clock order (ESPN lists keyEvents chronologically, but never rely on it for a running delta).
+	goals.sort((a, b) => (a.clock?.value ?? Number.MAX_SAFE_INTEGER) - (b.clock?.value ?? Number.MAX_SAFE_INTEGER));
+
+	const plays: ScoringPlay[] = [];
+	let runH = 0;
+	let runA = 0;
+	for (const e of goals) {
+		const kind = `${e.type?.type ?? ""} ${e.type?.text ?? ""}`.toLowerCase();
+		const isOwnGoal = kind.includes("own") || /^\s*own goal/i.test(e.text ?? "");
+		const isPenalty = kind.includes("penalty");
+		// Credited side via the narrative's running score (own-goal-safe), else team.id (flipped for OG).
+		let teamId: string | undefined;
+		const h = typeof e.text === "string" ? scoreForName(e.text, home.name) : null;
+		const a = typeof e.text === "string" ? scoreForName(e.text, away.name) : null;
+		if (h !== null && a !== null) {
+			if (h > runH && a <= runA) teamId = home.id;
+			else if (a > runA && h <= runH) teamId = away.id;
+			runH = Math.max(runH, h);
+			runA = Math.max(runA, a);
+		}
+		if (!teamId && e.team?.id) {
+			const raw = e.team.id;
+			teamId = isOwnGoal ? (raw === home.id ? away.id : raw === away.id ? home.id : raw) : raw;
+		}
+		if (!teamId) continue;
+		const athlete = e.participants?.[0]?.athlete;
+		const scorer = athlete?.shortName ?? (athlete?.displayName ? shortForm(athlete.displayName) : undefined);
+		plays.push({
+			teamId,
+			scorer,
+			minute: parseMinute(e.clock?.displayValue),
+			athleteId: athlete?.id,
+			isOwnGoal: isOwnGoal || undefined,
+			isPenalty: isPenalty || undefined,
+		});
+	}
+	return plays;
+}
+
+/**
+ * Union of the scoreboard's plays and the summary's plays for the same match — whichever feed is AHEAD wins,
+ * so the list is as complete as the freshest feed. Two entries are the SAME goal when they share the credited
+ * side + minute and their athlete ids agree (or either is unknown). On a match, the scoreboard's `shortName`
+ * is kept (ESPN's canonical short form) and any flag either side knows is kept; unmatched entries from BOTH
+ * feeds are retained (handles the reverse lag too). Result is minute-ordered (unknown minutes last), stable.
+ * Empty summary ⇒ the scoreboard list unchanged (the fake-match harness has no /summary).
+ */
+export function mergePlays(details: ScoringPlay[], summary: ScoringPlay[]): ScoringPlay[] {
+	if (summary.length === 0) return details;
+	const out: ScoringPlay[] = details.map((p) => ({ ...p }));
+	for (const s of summary) {
+		const match = out.find(
+			(d) =>
+				d.teamId === s.teamId &&
+				d.minute === s.minute &&
+				(d.athleteId == null || s.athleteId == null || d.athleteId === s.athleteId),
+		);
+		if (match) {
+			match.scorer = match.scorer ?? s.scorer;
+			match.athleteId = match.athleteId ?? s.athleteId;
+			match.isOwnGoal = match.isOwnGoal || s.isOwnGoal || undefined;
+			match.isPenalty = match.isPenalty || s.isPenalty || undefined;
+		} else {
+			out.push({ ...s });
+		}
+	}
+	const key = (p: ScoringPlay): number => (p.minute == null ? Number.MAX_SAFE_INTEGER : p.minute);
+	return out
+		.map((p, i) => ({ p, i }))
+		.sort((x, y) => key(x.p) - key(y.p) || x.i - y.i)
+		.map(({ p }) => p);
+}
+
+/** Display line for a scoring play — "M. Barcenas 72'", "K. Dali (OG) 81'" — or undefined when ESPN
+ *  gave no scorer (callers then show the bare scoreline; a name is never fabricated). Shared by the V1
+ *  push copy and the Live Activity scorer lists so both read identically. */
+export function playLabel(p: ScoringPlay | undefined): string | undefined {
+	if (!p?.scorer) return undefined;
+	const who = p.isOwnGoal ? `${p.scorer} (OG)` : p.scorer;
+	return p.minute != null ? `${who} ${p.minute}'` : who;
+}
+
+/**
+ * The scoring play for a side's N-th goal (1-based), in minute order — or undefined when fewer than N plays
+ * are attributed to that side. THIS is the rule that stops a previous goal's scorer being named on a new one
+ * (2026-09-12: "G. Corley 23'" on Barcenas's 72' goal — the old `latestPlayFor` took "the last play for that
+ * team, whatever it is", and the play list lagged the score). With N = the side's NEW score, a lagging list
+ * simply yields undefined → bare scoreline, which is always truthful.
+ */
+export function playForGoalNumber(match: Match, teamId: string, n: number): ScoringPlay | undefined {
+	if (!Number.isFinite(n) || n < 1) return undefined;
+	const key = (p: ScoringPlay): number => (p.minute == null ? Number.MAX_SAFE_INTEGER : p.minute);
+	const mine = match.plays
+		.map((p, i) => ({ p, i }))
+		.filter(({ p }) => p.teamId === teamId)
+		.sort((x, y) => key(x.p) - key(y.p) || x.i - y.i)
+		.map(({ p }) => p);
+	return mine.length >= n ? mine[n - 1] : undefined;
+}
+
 /** Parse a minute out of an ESPN play clock displayValue ("67'", "45'+2'" → 45). */
 function parseMinute(displayValue?: string): number | undefined {
 	const m = /(\d{1,3})/.exec(displayValue ?? "");
@@ -248,7 +400,9 @@ function parseMinute(displayValue?: string): number | undefined {
 	return Number.isFinite(n) ? n : undefined;
 }
 
-/** The scoreboard's scoring plays, reduced + defensively parsed (may be empty). */
+/** The scoreboard's scoring plays, reduced + defensively parsed (may be empty). ⚠️ This list LAGS the
+ *  scoreboard's own competitor score by minutes (live-observed 2026-09-12: score 2–0 while `details` still
+ *  listed only the 1st goal) — never attribute a NEW goal from it alone; see `mergePlays` + `playForGoalNumber`. */
 function parsePlays(details?: ScoreboardDetail[]): ScoringPlay[] {
 	const plays: ScoringPlay[] = [];
 	for (const d of details ?? []) {
@@ -258,6 +412,9 @@ function parsePlays(details?: ScoreboardDetail[]): ScoringPlay[] {
 			teamId: d.team.id,
 			scorer: athlete?.shortName ?? athlete?.displayName,
 			minute: parseMinute(d.clock?.displayValue),
+			athleteId: athlete?.id,
+			isOwnGoal: d.ownGoal === true || undefined,
+			isPenalty: d.penaltyKick === true || undefined,
 		});
 	}
 	return plays;
@@ -459,20 +616,16 @@ function matchup(match: Match): string {
 	return `${match.home.abbr} vs ${match.away.abbr}`;
 }
 
-/** The most recent scoring play attributed to `teamId`, if any. */
-function latestPlayFor(match: Match, teamId: string): ScoringPlay | undefined {
-	let found: ScoringPlay | undefined;
-	for (const p of match.plays) if (p.teamId === teamId) found = p;
-	return found;
-}
+// `latestPlayFor` ("the last play for that team, whatever it is") was REMOVED 2026-09-12: with the play
+// list lagging the score it named the PREVIOUS goal's scorer on a new goal. Goals now resolve their play
+// with `playForGoalNumber(match, teamId, newScore)` — see its doc.
 
 /** Goal line 2 (v4): "S. Menti 19' · NC 0–1 SEA" — SCORER first (the news), then the scoreboard;
- *  degrades to the bare scoreline when no scorer is attributed (never fabricated). */
+ *  degrades to the bare scoreline when no scorer is attributed (never fabricated). Own goal: "K. Dali (OG) 81'". */
 function goalSubtitle(match: Match, play?: ScoringPlay): string {
 	const score = scoreline(match);
-	if (!play?.scorer) return score;
-	const who = play.minute != null ? `${play.scorer} ${play.minute}'` : play.scorer;
-	return `${who} · ${score}`;
+	const who = playLabel(play);
+	return who ? `${who} · ${score}` : score;
 }
 
 /** Kickoff subtitle: "Audi Field · Victory+" — where + how to watch (the old body's info,
@@ -524,11 +677,14 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 		});
 	}
 
-	// Goals — a side's score rose (needs a prior baseline). Attribute the scorer +
-	// minute best-effort from the scoreboard's scoring plays for that side.
+	// Goals — a side's score rose (needs a prior baseline). Attribute the scorer + minute from the play
+	// list (scoreboard `details` MERGED with /summary keyEvents — see mergePlays) by GOAL NUMBER: the side's
+	// new score is N, so only the N-th attributed play for that side may be named. Fewer than N plays ⇒
+	// no name ⇒ bare scoreline (2026-09-12: the old "latest play for that team" rule put "G. Corley 23'"
+	// on Barcenas's 72' goal while the scoreboard's play list lagged its score).
 	if (prev) {
 		if (match.home.score > prev.home.score) {
-			const play = latestPlayFor(match, match.home.id);
+			const play = playForGoalNumber(match, match.home.id, match.home.score);
 			events.push({
 				...base,
 				type: "goal",
@@ -541,7 +697,7 @@ export function detectEvents(prev: StoredState | null, match: Match): MatchEvent
 			});
 		}
 		if (match.away.score > prev.away.score) {
-			const play = latestPlayFor(match, match.away.id);
+			const play = playForGoalNumber(match, match.away.id, match.away.score);
 			events.push({
 				...base,
 				type: "goal",

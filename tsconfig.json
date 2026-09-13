@@ -8,6 +8,10 @@
 		"allowJs": true,
 		"checkJs": false,
 		"noEmit": true,
+		// Runtime relative imports between src modules use explicit `.ts` specifiers (livestate.ts → "./events.ts"):
+		// `node --test` (the only runner that works on Node 26) cannot resolve extensionless TS imports, while
+		// wrangler/esbuild resolve `.ts` fine. Legal here because noEmit is on. (2026-09-12)
+		"allowImportingTsExtensions": true,
 		"isolatedModules": true,
 		"allowSyntheticDefaultImports": true,
 		"forceConsistentCasingInFileNames": true,
