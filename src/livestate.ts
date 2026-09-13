@@ -73,8 +73,10 @@ function phaseFromMatch(m: Match): LivePhase {
 	if (m.state === "post") return "fulltime";
 	const n = m.statusName.toUpperCase();
 	if (n.includes("HALFTIME")) return "halftime";
-	if (n.includes("SHOOTOUT") || n.includes("PENALT")) return "penalties";
-	if (m.period >= 3) return "extraTime"; // league rarely uses it, but handle gracefully
+	// Period 5 = shootout (verified on real pens matches; the LIVE status NAME is not, so the name match is belt).
+	// Mirrors `clockRunning` — the card must show a static "PENS", never a clock ticking past 120'.
+	if (m.period >= 5 || n.includes("SHOOTOUT") || n.includes("PENALT")) return "penalties";
+	if (m.period >= 3) return "extraTime"; // knockouts (playoffs / cup finals); period 3 = ET1, 4 = ET2
 	return "live";
 }
 
