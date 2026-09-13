@@ -145,15 +145,18 @@ test("content-state: scorers partitioned per side; red counts present only where
 	assert.equal(cs.awayRedCards, 1);
 });
 
-test("content-state: scorer list caps at 4 with an overflow marker", () => {
-	const goals = ["5'", "20'", "33'", "47'", "61'", "78'"].map((min, i) =>
-		goalDetail("15365", `Scorer${i + 1}`, min),
-	);
-	const m = parseMatch(scoreboardEvent(goals, "6", "0"))!;
-	const cs = contentStateFromMatch(m);
-	assert.equal(cs.homeScorers!.length, 4);
-	assert.deepEqual(cs.homeScorers!.slice(0, 3), ["Scorer1 5'", "Scorer2 20'", "Scorer3 33'"]);
-	assert.equal(cs.homeScorers![3], "+3 more");
+test("content-state: scorer list caps at 7 with an overflow marker (cap raised 4 → 7 in #41)", () => {
+	// 6 goals fit under the cap of 7 → all six lines, no marker.
+	const six = ["5'", "20'", "33'", "47'", "61'", "78'"].map((min, i) => goalDetail("15365", `Scorer${i + 1}`, min));
+	const cs6 = contentStateFromMatch(parseMatch(scoreboardEvent(six, "6", "0"))!);
+	assert.equal(cs6.homeScorers!.length, 6);
+	assert.equal(cs6.homeScorers![5], "Scorer6 78'");
+	// 9 goals exceed the cap → the first 6 lines + "+3 more" (7 lines total).
+	const nine = ["5'", "12'", "20'", "33'", "47'", "61'", "70'", "78'", "88'"].map((min, i) => goalDetail("15365", `Scorer${i + 1}`, min));
+	const cs9 = contentStateFromMatch(parseMatch(scoreboardEvent(nine, "9", "0"))!);
+	assert.equal(cs9.homeScorers!.length, 7);
+	assert.deepEqual(cs9.homeScorers!.slice(0, 3), ["Scorer1 5'", "Scorer2 12'", "Scorer3 20'"]);
+	assert.equal(cs9.homeScorers![6], "+3 more");
 });
 
 test("content-state: 0-0 with no cards omits all per-side keys (old payload shape preserved)", () => {

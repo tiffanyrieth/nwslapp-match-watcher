@@ -9,6 +9,7 @@
 
 import type { LiveAttributes, LiveContentState, LivePhase } from "./activitykit";
 import type { Match, ScoreboardEvent } from "./events";
+import { playLabel } from "./events.ts"; // one renderer for scorer lines, shared with the V1 push copy (2026-09-12). `.ts` on purpose: node --test needs it (tsconfig allowImportingTsExtensions)
 
 // NWSL brand hex by abbreviation (no '#') — mirrors NWSLApp DesignTeamColors.palette.
 // ⚠️ KEEP IN SYNC BY HAND: the app palette had a "verified 2026" brand-color pass (official club
@@ -79,8 +80,8 @@ function phaseFromMatch(m: Match): LivePhase {
 
 function lastScorer(m: Match): string | undefined {
 	for (let i = m.plays.length - 1; i >= 0; i--) {
-		const p = m.plays[i];
-		if (p.scorer) return p.minute ? `${p.scorer} ${p.minute}'` : p.scorer;
+		const label = playLabel(m.plays[i]); // shared with the V1 copy — "M. Barcenas 72'", "K. Dali (OG) 81'"
+		if (label) return label;
 	}
 	return undefined;
 }
@@ -98,8 +99,9 @@ const SCORERS_PER_SIDE_CAP = 7;
 function sideScorers(m: Match, teamId: string): string[] | undefined {
 	const lines: string[] = [];
 	for (const p of m.plays) {
-		if (p.teamId !== teamId || !p.scorer) continue;
-		lines.push(p.minute != null ? `${p.scorer} ${p.minute}'` : p.scorer);
+		if (p.teamId !== teamId) continue;
+		const label = playLabel(p); // shared with the V1 copy; undefined when unattributed (skipped)
+		if (label) lines.push(label);
 	}
 	if (lines.length === 0) return undefined;
 	if (lines.length > SCORERS_PER_SIDE_CAP) {

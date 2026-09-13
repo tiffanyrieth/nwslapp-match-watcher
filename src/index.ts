@@ -42,6 +42,8 @@ import {
 	type ScoreboardEvent,
 	type StoredState,
 } from "./events";
+// Scorer attribution from /summary keyEvents (2026-09-12) — merged onto the scoreboard's lagging play list.
+import { mergePlays, summaryScoringPlays } from "./events";
 // NOTE: the /card PNG renderer (satori + resvg-wasm + fonts, ~3.4MB) is NO LONGER imported
 // here. It lives in the sibling `nwslapp-card` worker (src/card-worker.ts + wrangler.card.jsonc)
 // so its cold-start module-eval never touches this cron's per-tick CPU budget — the fix for the
@@ -889,6 +891,14 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 						if (sg.home > match.home.score) match.home.score = sg.home;
 						if (sg.away > match.away.score) match.away.score = sg.away;
 					}
+					// SCORER ATTRIBUTION (2026-09-12): the score-raise above brought the goal's TIMING from /summary
+					// but left the scorer on the scoreboard's `details`, which lags its own score by minutes — so a
+					// goal push went out as "G. Corley 23' · SD 2–0 NC" (the previous goal's scorer) and an NC goal
+					// went out nameless. Merge the summary's scoring plays (scorer + minute + credited side, from the
+					// same payload — zero extra requests) onto the scoreboard's list so detectEvents / the V1 copy /
+					// the LA scorer lists all see the freshest attribution. Best-effort: an unparseable summary
+					// leaves the scoreboard plays untouched.
+					match.plays = mergePlays(match.plays, summaryScoringPlays(sum.keyEvents, match.home, match.away));
 				}
 			} catch (err) {
 				console.log(`[watcher] summary goal cross-check failed (${match.eventId}): ${err}`);
@@ -1096,7 +1106,15 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 // resync costs 1 KV write, not 3 — the dominant write path on a busy match day (docs/notifications.md).
 // `rs` = last resync time (the 10-min floor); `epoch` = last-broadcast anchor (null while paused, but the
 // last non-null value is retained so drift detection survives HT); `stop` = last stoppage label.
-interface AnchorState { rs: number; epoch: number | null; stop: string }
+interface AnchorState {
+	rs: number;
+	epoch: number | null;
+	stop: string;
+	/** Attributed-scorer count (home + away) at the last broadcast — 2026-09-12: ESPN's scorer attribution can
+	 *  arrive minutes after the goal; when it does, re-broadcast so the card fills the name within one tick
+	 *  instead of waiting for the next event / 10-min floor. Optional: rows written before this field exist. */
+	sc?: number;
+}
 
 async function syncLiveActivity(
 	env: Env,
@@ -1155,14 +1173,20 @@ async function syncLiveActivity(
 	// weeks (owner, 2026-08-31) — the widget's static +N advances live on real devices as expected.
 	const stoppage = state.stoppageDisplay ?? "";
 	if (!resync && (prev?.stop ?? "") !== stoppage) resync = true;
+	// Scorer-attribution heal (2026-09-12): ESPN names the scorer minutes after the score changes at times, so
+	// the goal broadcast can go out with a scorer list one short. Re-broadcast as soon as the attributed count
+	// changes — the card fills the name within one tick instead of at the next event / the 10-min floor (the
+	// SD–NC LA showed only "G. Corley 23'" for ~10 min after the 72' goal). Bounded: ≤1 extra push per goal.
+	const scorerCount = (state.homeScorers?.length ?? 0) + (state.awayScorers?.length ?? 0);
+	if (!resync && prev?.sc != null && prev.sc !== scorerCount) resync = true;
 	// 10-min floor: re-broadcast even during smooth play so the widget can't coast too far behind.
 	if (!resync) resync = prev?.rs == null || Date.now() - prev.rs >= LA_RESYNC_MS;
 	if (resync) {
 		const r = await broadcastUpdate(apns, jwt, chanId, state);
 		console.log(`[watcher] LA broadcast update ${match.eventId}: ${r.ok ? "ok" : `${r.status} ${r.reason ?? ""}`}`);
-		// ONE write for all three fields. Keep the last non-null epoch while paused (HT) so the drift
-		// baseline survives the break — matches the old "only write epoch when running" behavior.
-		const next: AnchorState = { rs: Date.now(), epoch: epoch ?? prev?.epoch ?? null, stop: stoppage };
+		// ONE write for all fields. Keep the last non-null epoch while paused (HT) so the drift baseline
+		// survives the break — matches the old "only write epoch when running" behavior.
+		const next: AnchorState = { rs: Date.now(), epoch: epoch ?? prev?.epoch ?? null, stop: stoppage, sc: scorerCount };
 		await env.MATCH_STATE.put(anchorKey, JSON.stringify(next), { expirationTtl: MATCH_STATE_TTL });
 	}
 }
