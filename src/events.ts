@@ -601,6 +601,19 @@ export function winnerSideOf(m: Match): "home" | "away" | undefined {
 	return undefined;
 }
 
+/** Should this live→post transition be CONFIRMED (re-polled) before it fires full time? True for a LEVEL score
+ *  with no shootout in a KNOCKOUT competition (playoffs / cups — anything labelled other than plain "NWSL"):
+ *  a level knockout cannot end at 90' — it goes to extra time and pens — so a `post` there is either ESPN's
+ *  final state arriving BEFORE the shootout tally, or a transient flicker at the end of regulation. ESPN's LIVE
+ *  90'→ET→pens transition names are unverified (2026-09-13; only end states exist in historical payloads), so
+ *  this is insurance: the caller re-polls once (the VAR-debounce pattern) and fires on what persists. Regular
+ *  season, decided knockouts, and pens finals are untouched — the FT push goes out on the first sighting. */
+export function knockoutFTNeedsConfirm(prev: StoredState | null, m: Match): boolean {
+	if (!prev || prev.state !== "in" || m.state !== "post" || m.unfinishedPost) return false;
+	if (m.home.score !== m.away.score || wentToPens(m)) return false;
+	return !!m.competition && m.competition !== "NWSL";
+}
+
 /** How far EARLIER (sec) a same-period candidate may move the anchor before we call it a feed
  *  glitch. `Math.min` is a one-way RATCHET: one tick with an inflated `status.clock` (observed
  *  live 7/5 — the widget clock jumped forward when a goal was processed) would move the anchor

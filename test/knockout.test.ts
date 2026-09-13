@@ -16,6 +16,7 @@ import {
 	clockRunning,
 	detectEvents,
 	fulltimeSubtitle,
+	knockoutFTNeedsConfirm,
 	mergePlays,
 	parseMatch,
 	summaryGoalScore,
@@ -163,6 +164,37 @@ test("extra time Live Activity: period 3/4 → extraTime, clock running from the
 	assert.equal(cs.staticLabel, undefined);
 	assert.equal(cs.clockStartEpoch, 1_700_000_000);
 	assert.equal(clockRunning(m), true);
+});
+
+test("Live Activity content-state: pens tally rides as homePens/awayPens (both keys) only once a shootout exists", () => {
+	const live = liveShootout(); // real fixture: home 3, away 0
+	const cs = contentStateFromMatch(live, 1_700_000_000);
+	assert.deepEqual([cs.homePens, cs.awayPens], [3, 0]); // a present 0 is real, never dropped
+	const final = must(parseMatch(PENS.scoreboardEvent), "a parsed match");
+	const fcs = contentStateFromMatch(final, 1_700_000_000);
+	assert.deepEqual([fcs.phase, fcs.staticLabel, fcs.homeScore, fcs.awayScore, fcs.homePens, fcs.awayPens], ["fulltime", "FT", 1, 1, 3, 0]);
+	// Regular play / no shootout: neither key (the widget must not render a phantom "0 – 0" tally).
+	const regular: Match = { ...live, period: 2, home: { ...live.home, pens: undefined }, away: { ...live.away, pens: undefined } };
+	const rcs = contentStateFromMatch(regular, 1_700_000_000);
+	assert.equal("homePens" in rcs && rcs.homePens !== undefined, false);
+	assert.equal(rcs.awayPens, undefined);
+});
+
+// ── knockout full-time confirm (insurance against an unverified 90' `post` flicker) ───────────
+
+test("knockoutFTNeedsConfirm: only a LEVEL, pens-less live→post in a knockout competition", () => {
+	const base = must(parseMatch(PENS.scoreboardEvent), "a parsed match");
+	const prev = liveBefore(base);
+	const level: Match = { ...base, competition: "NWSL Playoffs", home: { ...base.home, pens: undefined, winner: undefined }, away: { ...base.away, pens: undefined } };
+	assert.equal(knockoutFTNeedsConfirm(prev, level), true, "level + no tally + playoffs → confirm");
+	assert.equal(knockoutFTNeedsConfirm(prev, { ...level, competition: "Challenge Cup" }), true, "cups too");
+	assert.equal(knockoutFTNeedsConfirm(prev, { ...level, competition: "NWSL" }), false, "regular season draws fire at once");
+	assert.equal(knockoutFTNeedsConfirm(prev, { ...level, competition: undefined }), false, "unknown competition → no hold");
+	assert.equal(knockoutFTNeedsConfirm(prev, { ...base, competition: "NWSL Playoffs" }), false, "pens tally present → a real final");
+	assert.equal(knockoutFTNeedsConfirm(prev, { ...level, home: { ...level.home, score: 2 } }), false, "decided on the scoreline → fires");
+	assert.equal(knockoutFTNeedsConfirm(prev, { ...level, unfinishedPost: true }), false, "suspended → the existing hold path, not this one");
+	assert.equal(knockoutFTNeedsConfirm(null, level), false, "no prior live state → nothing to confirm (already skipped)");
+	assert.equal(knockoutFTNeedsConfirm({ ...prev, state: "post" }, level), false);
 });
 
 // ── the /summary side of a pens match ────────────────────────────────────────

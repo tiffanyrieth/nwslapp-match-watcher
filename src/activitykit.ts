@@ -38,6 +38,12 @@ export interface LiveContentState {
 	 *  (Apple's Text(timerInterval:) can't format football stoppage), refreshed each minute by a
 	 *  broadcast. Omitted during normal play (compact() drops it) → the widget uses the local clock. */
 	stoppageDisplay?: string;
+	/** Penalty-shootout tally per side (2026-09-13) — present ONLY once a shootout exists (ESPN's
+	 *  `shootoutScore`), during the `penalties` phase and on the final card after it. `homeScore`/`awayScore`
+	 *  stay the 120' score, exactly as ESPN keeps them. Additive-optional: builds before the widget learned
+	 *  the keys ignore them; the Swift fields are Optional. */
+	homePens?: number;
+	awayPens?: number;
 }
 
 /** Mirrors Swift MatchActivityAttributes (the static, set-once fields). */
