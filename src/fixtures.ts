@@ -100,8 +100,11 @@ export const DISCOVERY_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export const ACTIVE_LEAD_MS = 75 * 60 * 1000;
 
 /** Poll a feed this far AFTER kickoff as the backstop (matches the pre-existing live-window
- *  WINDOW_PAST_MS); the `ended` mark usually closes the window hours earlier at real full-time. */
-export const ACTIVE_TAIL_MS = 4 * 60 * 60 * 1000;
+ *  WINDOW_PAST_MS — keep them equal); the `ended` mark usually closes the window hours earlier at real
+ *  full-time. 4h → 4.5h (2026-09-13): a knockout that goes to extra time + a shootout ends ~2h50–3h after
+ *  kickoff, and 4h left little headroom for a weather delay on top. Cost: ≤30 extra proxy calls per match
+ *  that never reaches `post`. */
+export const ACTIVE_TAIL_MS = 4.5 * 60 * 60 * 1000;
 
 /** Kickoff time in ms, tolerating ESPN's seconds-less timestamps ("…T17:00Z").
  *  (Moved here from index.ts so the index builder and the tick share one parser.) */

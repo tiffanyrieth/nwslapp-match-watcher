@@ -43,7 +43,7 @@ import {
 	type StoredState,
 } from "./events";
 // Scorer attribution from /summary keyEvents (2026-09-12) — merged onto the scoreboard's lagging play list.
-import { mergePlays, summaryScoringPlays } from "./events";
+import { fulltimeSubtitle, knockoutFTNeedsConfirm, mergePlays, summaryScoringPlays, winnerSideOf } from "./events";
 // NOTE: the /card PNG renderer (satori + resvg-wasm + fonts, ~3.4MB) is NO LONGER imported
 // here. It lives in the sibling `nwslapp-card` worker (src/card-worker.ts + wrangler.card.jsonc)
 // so its cold-start module-eval never touches this cron's per-tick CPU budget — the fix for the
@@ -671,7 +671,9 @@ export default {
 // in-progress + just-finished) and not more than 5min in the future. This bounds
 // the per-match KV reads to today's handful of games instead of the whole season.
 // (`kickoffMs` moved to fixtures.ts — the fixture index shares the same parser.)
-const WINDOW_PAST_MS = 4 * 60 * 60 * 1000;
+// 4h → 4.5h (2026-09-13): a knockout that goes the distance (ET + shootout) runs ~2h50–3h after kickoff; 4h
+// left little room for a weather delay on top. Mirrors fixtures.ts ACTIVE_TAIL_MS — keep them equal.
+const WINDOW_PAST_MS = 4.5 * 60 * 60 * 1000;
 const WINDOW_FUTURE_MS = 5 * 60 * 1000;
 
 // The fixture index (fixture-window polling — see src/fixtures.ts for the doctrine): one KV key,
@@ -741,7 +743,7 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	//    The rebuild is accepted ONLY on a complete sweep — a partial sweep (proxy blip) keeps
 	//    the previous index (or stays null) so discovery retries NEXT TICK instead of a bad
 	//    index silencing polling for 6h.
-	//  - Otherwise → fetch only feeds with a fixture inside [KO−75m … KO+4h] (minus ended).
+	//  - Otherwise → fetch only feeds with a fixture inside [KO−75m … KO+4.5h] (minus ended).
 	//    No active fixtures ⇒ this tick makes ZERO proxy fetches (was: 16 every minute, 24/7).
 	let index = await env.MATCH_STATE.get<FixtureIndex>(FIXTURE_INDEX_KEY, "json");
 	const feedEvents = new Map<string, ScoreboardEvent[]>();
@@ -905,7 +907,7 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 			}
 		}
 
-		const detected = detectEvents(prev, match);
+		let detected = detectEvents(prev, match);
 
 		// One V1 fan-out (follower lookup → enqueue) — shared by normal events and the VAR correction.
 		// Delivery + prune happen in the queue consumer; here we only look up tokens and enqueue, so the
@@ -952,6 +954,47 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 				console.log(`[watcher] correction ${match.eventId} re-poll FAILED — holding prior ${candidate.prev.home}-${candidate.prev.away} baseline (no false goal)`);
 			} else {
 				console.log(`[watcher] correction ${match.eventId} discarded — decrease did not persist (glitch)`);
+			}
+		}
+
+		// KNOCKOUT FULL-TIME CONFIRM (2026-09-13). A LEVEL score with no shootout tally in a knockout competition
+		// cannot be a final — it's either ESPN's final arriving a beat before `shootoutScore`, or a transient
+		// `post` flicker at the end of regulation (ESPN's live 90'→ET→pens names are unverified). Firing on it
+		// would push a false "Full time" draw AND tear the Live Activity down irreversibly (the 2026-07-29
+		// suspension class). Same shape as the VAR debounce: wait, re-poll FRESH, act on what persists. This is
+		// IN-TICK on purpose — a cross-tick hold can't work, because reconcileFeed already marked the fixture
+		// `ended` from this payload and the feed would stop being polled (never re-seen ⇒ FT never fires).
+		if (knockoutFTNeedsConfirm(prev, match)) {
+			console.log(
+				`[watcher] knockout FT candidate ${match.eventId}: level ${match.home.score}-${match.away.score}, no shootout tally (${match.competition}); confirming after ${CORRECTION_DEBOUNCE_MS}ms`,
+			);
+			await sleep(CORRECTION_DEBOUNCE_MS);
+			const recheck = await refetchMatch(env, match.eventId);
+			if (recheck) recheck.competition = match.competition;
+			if (recheck && recheck.state === "in") {
+				// Flicker: play continues (extra time / shootout). Withdraw FT, baseline + LA-sync from the live
+				// snapshot, and RE-OPEN the fixture window that reconcileFeed closed from the flickered payload —
+				// the index is written back after this loop (indexDirty), so the un-mark persists.
+				effectiveMatch = recheck;
+				detected = detected.filter((e) => e.type !== "fulltime");
+				const fx = index?.fixtures.find((f) => f.id === match.eventId);
+				if (fx?.ended) { fx.ended = false; indexDirty = true; }
+				console.log(`[watcher] knockout FT ${match.eventId} WITHDRAWN — ESPN back to "in" (${recheck.statusName}, period ${recheck.period}); fixture window re-opened`);
+			} else if (recheck) {
+				// Persisting final — fire, but from the FRESH snapshot (it may now carry the pens tally / winner
+				// that the first payload lacked, which is what the FT copy names).
+				effectiveMatch = recheck;
+				detected = detected.map((e) =>
+					e.type === "fulltime"
+						? { ...e, subtitle: fulltimeSubtitle(recheck), scoringSide: winnerSideOf(recheck), homeScore: recheck.home.score, awayScore: recheck.away.score }
+						: e,
+				);
+				console.log(`[watcher] knockout FT ${match.eventId} CONFIRMED (${recheck.statusName}, pens ${recheck.home.pens ?? "-"}-${recheck.away.pens ?? "-"})`);
+			} else {
+				// Re-poll failed: FAIL-OPEN to today's behaviour (fire on the original, `completed:true` payload) —
+				// a missed full-time push is the worse failure, and a false one here needs the flicker AND an
+				// outage to coincide.
+				console.log(`[watcher] knockout FT ${match.eventId} re-poll FAILED — firing on the original payload`);
 			}
 		}
 
@@ -1202,10 +1245,24 @@ async function syncLiveActivity(
  *  status.period, status.clock[sec], competitors[].score). */
 interface FakeGoal { at: number; side: "home" | "away"; scorer: string; minute: number; disallowedAt?: number }
 interface FakeRed { at: number; side: "home" | "away"; player: string; minute: number }
+/** A period boundary on the knockout timeline: from `at`, report `period`/`name` with the clock re-based to
+ *  `clockSec` (+ wall-clock since `at`, or frozen for the shootout) — exactly how ESPN's clock restarts at
+ *  90:00 for ET1, 105:00 for ET2, and freezes at 120:00 through the pens (verified end states, 2026-09-13). */
+interface FakeStage { at: number; period: number; name: string; clockSec: number; frozen?: boolean }
+/** One shootout kick. A SCORED kick lands in `details` as ESPN sends it (`scoringPlay:true, shootout:true,
+ *  penaltyKick:true, type 104 "Penalty - Scored", clock "120'"`); a missed one is simply absent, and both
+ *  advance `shootoutScore` only when scored — the exact shape the watcher must NOT read as a goal. */
+interface FakeKick { at: number; side: "home" | "away"; taker: string; scored: boolean }
 interface FakeMatchSpec {
 	id: string; homeId: string; homeAbbr: string; awayId: string; awayAbbr: string;
 	kickoffMs: number; ftMs: number;
 	goals: FakeGoal[]; reds: FakeRed[];
+	/** Knockout timeline (2026-09-13): period stages after kickoff (ET1/ET2/shootout), the kicks, and the final
+	 *  status ESPN reports (`STATUS_FINAL_PEN` period 5 "FT-Pens" / `STATUS_FINAL_AET` period 4 "AET"). Absent on
+	 *  the regular scripts → the pre-existing 1st/2nd-half derivation below is unchanged. */
+	stages?: FakeStage[];
+	kicks?: FakeKick[];
+	final?: { name: string; period: number; shortDetail: string };
 	/** Source feed the synthetic fixture pretends to come from (default NWSL) — lets a fake CUP
 	 *  match exercise the competition-label path organically ("Challenge Cup" on the device card). */
 	feed?: string;
@@ -1220,19 +1277,30 @@ async function readFakeMatch(env: Env): Promise<{ event: ScoreboardEvent; feed: 
 	const spec = (await env.MATCH_STATE.get("debug:fake-match", "json")) as FakeMatchSpec | null;
 	if (!spec) return null;
 	const now = Date.now();
-	let state = "pre", name = "STATUS_SCHEDULED", period = 0, clock = 0;
+	let state = "pre", name = "STATUS_SCHEDULED", period = 0, clock = 0, shortDetail: string | undefined;
 	if (now >= spec.ftMs) {
-		state = "post"; name = "STATUS_FULL_TIME"; period = 2;
+		state = "post";
+		name = spec.final?.name ?? "STATUS_FULL_TIME";
+		period = spec.final?.period ?? 2;
+		shortDetail = spec.final?.shortDetail;
 	} else if (now >= spec.kickoffMs) {
 		state = "in";
-		// Elapsed match seconds (+ optional clockOffsetSec so a scenario can OPEN mid-match — see the
-		// FakeMatchSpec doc). Default offset 0 → plain from-kickoff, unchanged for the default script.
-		clock = Math.floor((now - spec.kickoffMs) / 1000) + (spec.clockOffsetSec ?? 0);
-		// Period/name from the elapsed minute so the REAL clock path treats a late scenario as the 2nd
-		// half: contentStateFromMatch's stoppageLabel uses cap=90 for period 2 and emits "90'+n'" once the
-		// monotonic anchor carries elapsed past 90'. The default script stays under 45' → 1st half.
-		if (clock >= 45 * 60) { period = 2; name = "STATUS_SECOND_HALF"; }
-		else { period = 1; name = "STATUS_FIRST_HALF"; }
+		// Knockout timeline: the latest stage that has started wins (ET1 → ET2 → shootout), clock re-based per
+		// stage (frozen at 120:00 during the pens). Falls through to the regular derivation before the first stage.
+		const stage = (spec.stages ?? []).filter((s) => now >= s.at).sort((a, b) => a.at - b.at).pop();
+		if (stage) {
+			period = stage.period; name = stage.name;
+			clock = stage.frozen ? stage.clockSec : stage.clockSec + Math.floor((now - stage.at) / 1000);
+		} else {
+			// Elapsed match seconds (+ optional clockOffsetSec so a scenario can OPEN mid-match — see the
+			// FakeMatchSpec doc). Default offset 0 → plain from-kickoff, unchanged for the default script.
+			clock = Math.floor((now - spec.kickoffMs) / 1000) + (spec.clockOffsetSec ?? 0);
+			// Period/name from the elapsed minute so the REAL clock path treats a late scenario as the 2nd
+			// half: contentStateFromMatch's stoppageLabel uses cap=90 for period 2 and emits "90'+n'" once the
+			// monotonic anchor carries elapsed past 90'. The default script stays under 45' → 1st half.
+			if (clock >= 45 * 60) { period = 2; name = "STATUS_SECOND_HALF"; }
+			else { period = 1; name = "STATUS_FIRST_HALF"; }
+		}
 	}
 	// Build the scoreboard `details` (scoring plays + red cards) + running score AS OF `now` from the
 	// timeline. A goal with `disallowedAt` in the past is REMOVED (score decrements + its play drops) → a
@@ -1250,7 +1318,19 @@ async function readFakeMatch(env: Env): Promise<{ event: ScoreboardEvent; feed: 
 		if (now < r.at) continue;
 		details.push({ redCard: true, type: { text: "Red Card" }, team: { id: sideId(r.side) }, clock: { displayValue: `${r.minute}'` }, athletesInvolved: [{ shortName: r.player, displayName: r.player }] });
 	}
-	const status = { type: { state, name }, period, clock };
+	// Shootout kicks taken so far → the tally + a `details` entry per SCORED kick (ESPN's exact shape; misses are
+	// absent). `shootoutScore` appears once the first kick is taken; `winner` only at the final whistle.
+	const taken = (spec.kicks ?? []).filter((k) => now >= k.at);
+	let homePens = 0, awayPens = 0;
+	for (const k of taken) {
+		if (!k.scored) continue;
+		if (k.side === "home") homePens++; else awayPens++;
+		details.push({ scoringPlay: true, penaltyKick: true, shootout: true, ownGoal: false, type: { id: "104", text: "Penalty - Scored" }, team: { id: sideId(k.side) }, clock: { displayValue: "120'" }, athletesInvolved: [{ shortName: k.taker, displayName: k.taker }] });
+	}
+	const pens = taken.length > 0 ? { home: homePens, away: awayPens } : undefined;
+	const final = state === "post";
+	const winnerFlags = final && pens ? { home: homePens > awayPens, away: awayPens > homePens } : final ? { home: homeScore > awayScore, away: awayScore > homeScore } : undefined;
+	const status = { type: { state, name, ...(final ? { completed: true } : {}), ...(shortDetail ? { shortDetail } : {}) }, period, clock };
 	const event: ScoreboardEvent = {
 		id: spec.id,
 		date: new Date(spec.kickoffMs).toISOString(),
@@ -1259,8 +1339,8 @@ async function readFakeMatch(env: Env): Promise<{ event: ScoreboardEvent; feed: 
 			{
 				status,
 				competitors: [
-					{ homeAway: "home", score: String(homeScore), team: { id: spec.homeId, abbreviation: spec.homeAbbr, displayName: spec.homeAbbr } },
-					{ homeAway: "away", score: String(awayScore), team: { id: spec.awayId, abbreviation: spec.awayAbbr, displayName: spec.awayAbbr } },
+					{ homeAway: "home", score: String(homeScore), ...(pens ? { shootoutScore: pens.home } : {}), ...(winnerFlags ? { winner: winnerFlags.home } : {}), team: { id: spec.homeId, abbreviation: spec.homeAbbr, displayName: spec.homeAbbr } },
+					{ homeAway: "away", score: String(awayScore), ...(pens ? { shootoutScore: pens.away } : {}), ...(winnerFlags ? { winner: winnerFlags.away } : {}), team: { id: spec.awayId, abbreviation: spec.awayAbbr, displayName: spec.awayAbbr } },
 				],
 				details,
 				venue: { fullName: "Fake Match (debug harness)" },
@@ -1335,6 +1415,61 @@ async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 				`FT ${rel(ftMs)} (final ${homeAbbr} 1–0 ${awayAbbr})`,
 			],
 			note: `Needs a build-37 TestFlight install with alerts ON for ${homeAbbr} + Live Activities ON + app opened once (fresh start token). Watch for: crest render on the ⌚, the goal buzz, the >60' clock, the "90'+n'" stoppage label, FT ${homeAbbr} 1–0.`,
+		});
+	}
+
+	// ── "knockout": extra time + a penalty shootout through the ORGANIC path (2026-09-13) ─────────────
+	// The only on-demand rehearsal of the November playoffs before a real one. LA-start fires now, the match
+	// OPENS at 88' level 1–1 (both goals pre-placed → baselined, no pushes), ET1 at 90:00 with a HOME goal at 92',
+	// ET2 at 105:00 with the AWAY equaliser at 108' (two ET goal pushes; clock re-bases per period like ESPN's),
+	// then the shootout: period 5, clock frozen at 120', a kick every 30 s (H✓ A✓ H✓ A✗ H✓ A✗ → 3–1), and the
+	// final as ESPN reports it: STATUS_FINAL_PEN, period 5, "FT-Pens", score still 2–2, winner flagged.
+	// ~13 min wall-clock. Watch for: NO goal buzz on any kick, the LA showing PENS + the tally (build ≥ 42) with
+	// the scorer columns holding the four goals only, and FT "WAS 2–2 ORL · WAS win 3–1 on pens".
+	if (p.scenario === "knockout") {
+		const homeId = p.homeId ?? "15365", homeAbbr = p.homeAbbr ?? "WAS";
+		const awayId = p.awayId ?? "18206", awayAbbr = p.awayAbbr ?? "ORL";
+		const m = (n: number) => kickoffMs0 + n * 60_000;
+		const kickoffMs0 = now + 2 * 60_000;
+		const et1 = m(2.5), et2 = m(5), pensAt = m(7.5), ftMs = m(11.5);
+		const kickSides: Array<["home" | "away", string, boolean]> = [
+			["home", "A. Hatch", true], ["away", "M. Zerboni", true], ["home", "L. Silano", true],
+			["away", "E. González", false], ["home", "T. Rudd", true], ["away", "J. Nighswonger", false],
+		];
+		const kicks: FakeKick[] = kickSides.map(([side, taker, scored], i) => ({ at: m(8) + i * 30_000, side, taker, scored }));
+		const spec: FakeMatchSpec = {
+			id: `fakematch-${now}`, homeId, homeAbbr, awayId, awayAbbr,
+			kickoffMs: kickoffMs0, ftMs, clockOffsetSec: 88 * 60,
+			goals: [
+				{ at: kickoffMs0, side: "home", scorer: "T. Rodman", minute: 30 },
+				{ at: kickoffMs0, side: "away", scorer: "B. Banda", minute: 60 },
+				{ at: et1 + 60_000, side: "home", scorer: "C. Hutton", minute: 92 },
+				{ at: et2 + 60_000, side: "away", scorer: "M. Marta", minute: 108 },
+			],
+			reds: [],
+			stages: [
+				{ at: et1, period: 3, name: "STATUS_IN_PROGRESS", clockSec: 90 * 60 },
+				{ at: et2, period: 4, name: "STATUS_IN_PROGRESS", clockSec: 105 * 60 },
+				{ at: pensAt, period: 5, name: "STATUS_IN_PROGRESS", clockSec: 120 * 60, frozen: true },
+			],
+			kicks,
+			final: { name: "STATUS_FINAL_PEN", period: 5, shortDetail: "FT-Pens" },
+			...(p.feed ? { feed: p.feed } : { feed: "usa.nwsl.cup" }), // a knockout label by default (the FT-confirm keys on it)
+		};
+		await env.MATCH_STATE.put("debug:fake-match", JSON.stringify(spec), { expirationTtl: Math.ceil((ftMs - now) / 1000) + 600 });
+		const rel = (ms: number) => `+${Math.round(((ms - now) / 60_000) * 2) / 2}m`;
+		return j({
+			scheduled: { id: spec.id, teams: `${homeAbbr} v ${awayAbbr}`, scenario: "knockout", feed: spec.feed },
+			timeline: [
+				`LA-start ~now (pre card)`,
+				`kickoff ${rel(kickoffMs0)} — opens at 88', ${homeAbbr} 1–1 ${awayAbbr} (no pushes: baselined)`,
+				`ET1 ${rel(et1)} (period 3, clock restarts 90:00) → ${homeAbbr} goal C. Hutton 92' ${rel(et1 + 60_000)}`,
+				`ET2 ${rel(et2)} (period 4, clock 105:00) → ${awayAbbr} goal M. Marta 108' ${rel(et2 + 60_000)} → 2–2`,
+				`shootout ${rel(pensAt)} (period 5, clock frozen 120', LA → PENS)`,
+				...kicks.map((k) => `${k.side === "home" ? homeAbbr : awayAbbr} kick ${k.taker} ${k.scored ? "SCORED" : "missed"} ${rel(k.at)}`),
+				`FT ${rel(ftMs)} — STATUS_FINAL_PEN: "${homeAbbr} 2–2 ${awayAbbr} · ${homeAbbr} win 3–1 on pens"`,
+			],
+			note: `Needs alerts ON for ${homeAbbr} or ${awayAbbr} + Live Activities + a start token. MUST NOT happen: a goal buzz on a kick, a "120'" scorer line, a ticking clock past 120', an FT reading as a draw.`,
 		});
 	}
 

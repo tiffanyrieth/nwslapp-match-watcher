@@ -9,7 +9,7 @@
 
 import type { LiveAttributes, LiveContentState, LivePhase } from "./activitykit";
 import type { Match, ScoreboardEvent } from "./events";
-import { playLabel } from "./events.ts"; // one renderer for scorer lines, shared with the V1 push copy (2026-09-12). `.ts` on purpose: node --test needs it (tsconfig allowImportingTsExtensions)
+import { playLabel, wentToPens } from "./events.ts"; // one renderer for scorer lines, shared with the V1 push copy (2026-09-12). `.ts` on purpose: node --test needs it (tsconfig allowImportingTsExtensions)
 
 // NWSL brand hex by abbreviation (no '#') — mirrors NWSLApp DesignTeamColors.palette.
 // ⚠️ KEEP IN SYNC BY HAND: the app palette had a "verified 2026" brand-color pass (official club
@@ -159,6 +159,9 @@ export function contentStateFromMatch(m: Match, virtualKickoff?: number): LiveCo
 		homeRedCards: sideReds(m, m.home.id),
 		awayRedCards: sideReds(m, m.away.id),
 		stoppageDisplay,
+		// Shootout tally (knockouts only) — both keys or neither, so the widget can render "3 – 1" under the
+		// frozen 120' score without guessing a missing side as 0.
+		...(wentToPens(m) ? { homePens: m.home.pens ?? 0, awayPens: m.away.pens ?? 0 } : {}),
 		// Broadcast/TV on the live card's footer (dropped on a tall ≥6-scorer card, widget-side). parseMatch
 		// pulled it from the event's broadcasts[].names; nil (a mid-match blank) → the footer just omits it.
 		broadcast: m.broadcast,
