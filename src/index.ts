@@ -692,7 +692,14 @@ const DISCOVERY_HOURS = DISCOVERY_INTERVAL_MS / 3_600_000;
  */
 async function refetchMatch(env: Env, eventId: string): Promise<Match | null> {
 	try {
-		const url = `${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500&_cb=${Date.now()}`;
+		// ⚠️ NO `&limit=500` on any WINDOWED scoreboard poll (this + fetchFeed + the predict-results read):
+		// `limit=500` is the "schedule-extraction" shape ESPN serves from its 25–47-min-STALE cache — even
+		// with `_cb`, even single-day. Live-proven 2026-09-26 (POR–HOU): the stale `status.clock` it fed made
+		// the V2-LA anchor (`now − match.clock`) re-base ~12 min late at the H2 restart → widget read 50' at
+		// 62'. A yesterday→tomorrow window is ≤~18 events, far under ESPN's 100 default, so limit is never
+		// needed here. The proxy also strips it (proxyScoreboardWindow); this is the watcher-side
+		// belt-and-suspenders. The proxy's own full-season load keeps its limit. See docs/backend.md.
+		const url = `${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&_cb=${Date.now()}`;
 		const res = await env.PROXY.fetch(url, { headers: { Accept: "application/json" } });
 		if (!res.ok) {
 			console.log(`[watcher] correction re-poll failed: ${res.status}`);
@@ -724,7 +731,8 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	const fetchFeed = async (feed: string): Promise<ScoreboardEvent[] | null> => {
 		const league = feed === NWSL_FEED ? "" : `league=${feed}&`;
 		try {
-			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?${league}dates=${scoreboardWindow()}&limit=500${cb}`, {
+			// No `&limit=500` — it triggers ESPN's stale cache and skewed the LA clock anchor (see refetchMatch).
+			const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?${league}dates=${scoreboardWindow()}${cb}`, {
 				headers: { Accept: "application/json" },
 			});
 			if (!res.ok) {
@@ -1226,7 +1234,11 @@ async function syncLiveActivity(
 	if (!resync) resync = prev?.rs == null || Date.now() - prev.rs >= LA_RESYNC_MS;
 	if (resync) {
 		const r = await broadcastUpdate(apns, jwt, chanId, state);
-		console.log(`[watcher] LA broadcast update ${match.eventId}: ${r.ok ? "ok" : `${r.status} ${r.reason ?? ""}`}`);
+		// Log the anchor the widget will render from (+ the clock it was derived from). Added 2026-09-26 after
+		// a live H2-restart lag had to be inferred from broadcast GAPS because this line carried no anchor —
+		// now a stale/late re-anchor is visible directly: epoch jumps at each half's restart; `clock` should
+		// track real elapsed. See docs/live-activity-v2.md §4 + docs/backend.md (limit=500 stale cache).
+		console.log(`[watcher] LA broadcast update ${match.eventId}: ${r.ok ? "ok" : `${r.status} ${r.reason ?? ""}`} epoch=${epoch ?? "paused"} prevEpoch=${prev?.epoch ?? "none"} clock=${match.clock} period=${match.period}`);
 		// ONE write for all fields. Keep the last non-null epoch while paused (HT) so the drift baseline
 		// survives the break — matches the old "only write epoch when running" behavior.
 		const next: AnchorState = { rs: Date.now(), epoch: epoch ?? prev?.epoch ?? null, stop: stoppage, sc: scorerCount };
@@ -1647,7 +1659,8 @@ async function runPredictResultsPass(
 	const report: Array<{ home: string; away: string; predictors: number; qualifyingTokens: number; userIdsWouldMark: string[] }> = [];
 	let events: ScoreboardEvent[];
 	try {
-		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&limit=500`, {
+		// No `&limit=500` — it triggers ESPN's stale cache (see refetchMatch); a window never needs it.
+		const res = await env.PROXY.fetch(`${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}`, {
 			headers: { Accept: "application/json" },
 		});
 		if (!res.ok) {
