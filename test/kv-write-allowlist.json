@@ -1,0 +1,20 @@
+{
+	"_rule": "KV writes are reserved for live matches (owner ruling 2026-10-08; see the proxy repo's docs/decisions.md entry). The 1,000/day KV write cap is ACCOUNT-WIDE and shared with the proxy; this worker's MATCH_STATE writes ARE the live-match budget the rule protects. A NEW write here must be `live-match`, or an `owner-exception` approved in advance; `legacy` = pre-rule, inventoried, must not grow. Guard: test/kv-write-guard.test.ts (file + enclosing function + key expression + count).",
+	"_measured": "Owner, Cloudflare KV Metrics (2026-10-09, last 30 days): MATCH_STATE 120-200+ writes on a 2-4-match day; est. 300-400+ on an 8-match Decision Day.",
+	"sites": [
+		{ "file": "src/index.ts", "fn": "runWatch", "key": "key", "count": 2, "category": "live-match", "estPerDay": "~10 per match (write-on-change, sameStoredState)", "reason": "Per-match live state: kickoff, goals, cards, HT, FT." },
+		{ "file": "src/index.ts", "fn": "runWatch", "key": "FIXTURE_INDEX_KEY", "count": 1, "category": "live-match", "estPerDay": "few (on change)", "reason": "Fixture index for the watch loop." },
+		{ "file": "src/index.ts", "fn": "syncLiveActivity", "key": "anchorKey", "count": 1, "category": "live-match", "estPerDay": "~2-4 per match", "reason": "V2 Live Activity clock anchor." },
+		{ "file": "src/index.ts", "fn": "ensureMatchChannel", "key": "key", "count": 1, "category": "live-match", "estPerDay": "1 per match", "reason": "APNs broadcast channel id per match." },
+		{ "file": "src/index.ts", "fn": "sweepOrphanChannels", "key": "CHANNEL_SWEEP_KEY", "count": 1, "category": "live-match", "estPerDay": "~1", "reason": "Broadcast-channel orphan sweep marker." },
+		{ "file": "src/index.ts", "fn": "startUpcomingActivities", "key": "startedKey", "count": 1, "category": "live-match", "estPerDay": "1 per match", "reason": "Live Activity push-to-start one-shot." },
+		{ "file": "src/index.ts", "fn": "startNationalActivities", "key": "`la-start:${p.info.matchId}`", "count": 1, "category": "live-match", "estPerDay": "1 per NT match", "reason": "National-team Live Activity push-to-start one-shot." },
+		{ "file": "src/index.ts", "fn": "checkUpcomingLineups", "key": "pubKey", "count": 1, "category": "live-match", "estPerDay": "1 per match", "reason": "Lineups-posted detection marker." },
+		{ "file": "src/index.ts", "fn": "checkUpcomingLineups", "key": "sentKey", "count": 1, "category": "live-match", "estPerDay": "1 per match", "reason": "Lineups push one-shot dedup." },
+		{ "file": "src/index.ts", "fn": "runPredictResultsPass", "key": "`predict-nopredictors:${eventId}`", "count": 1, "category": "live-match", "estPerDay": "<= finished matches", "reason": "Post-match Predict results: no-predictors marker per match." },
+		{ "file": "src/index.ts", "fn": "maybeRunPredictResultsPass", "key": "hourKey", "count": 1, "category": "legacy", "estPerDay": "24 (flat, every day, matches or not)", "reason": "Predict-results hourly run marker: a flat 24/day, every day, even with no matches. Owner decision 2026-10-09: KEEP for now (Predict is part of the match experience; 24/day is small next to the 200-425/day removed from the proxy). If KV ever tightens, move this marker into the TickMetronome DO." },
+		{ "file": "src/index.ts", "fn": "maybeRunKnowHerPublishPass", "key": "weekMarker", "count": 1, "category": "legacy", "estPerDay": "~0 (weekly)", "reason": "Know Her Game weekly publish marker." },
+		{ "file": "src/index.ts", "fn": "handleFakeMatch", "key": "\"debug:fake-match\"", "count": 3, "category": "legacy", "estPerDay": "0 (owner test harness only)", "reason": "Fake-match harness for organic V2-LA tests (owner-run)." },
+		{ "file": "src/index.ts", "fn": "handleTestBroadcast", "key": "chanKey", "count": 1, "category": "legacy", "estPerDay": "0 (owner test tool only)", "reason": "Test broadcast channel (owner-run)." }
+	]
+}
