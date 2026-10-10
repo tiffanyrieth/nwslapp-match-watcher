@@ -371,14 +371,107 @@ export async function tokensForCompetitionEvent(
 	followKeys: string[],
 	prefColumn: PrefColumn,
 ): Promise<string[]> {
-	if (followKeys.length === 0) return [];
+	return (await resolveCompetitionTokensForEvent(cfg, followKeys, prefColumn)).tokens;
+}
+
+/** The NT twin of resolveTokensForEvent — the same gate-by-gate breakdown (`teamOptIns` = users with the
+ *  country bell ON for either side), so the NT lineup pass gets the club pass's "SUSPICIOUS 0 recipients"
+ *  diagnostic (NO SILENT FAILURES). */
+export async function resolveCompetitionTokensForEvent(
+	cfg: SupabaseConfig,
+	followKeys: string[],
+	prefColumn: PrefColumn,
+): Promise<FanoutResolution> {
+	if (followKeys.length === 0) return { tokens: [], teamOptIns: 0, prefEligible: 0 };
 	if (!PREF_COLUMNS.includes(prefColumn)) throw new Error(`Unknown pref column: ${prefColumn}`);
 
 	const alertRows = await rest<{ user_id: string }>(
 		cfg,
 		`competition_alert_preferences?follow_key=in.${inListQuoted(followKeys)}&alerts_enabled=eq.true&select=user_id`,
 	);
-	return tokensForUsers(cfg, uniq(alertRows.map((r) => r.user_id)), prefColumn);
+	const optedInIds = uniq(alertRows.map((r) => r.user_id));
+	if (optedInIds.length === 0) return { tokens: [], teamOptIns: 0, prefEligible: 0 };
+
+	const prefRows = await rest<{ user_id: string }>(
+		cfg,
+		`notification_preferences?user_id=in.${inList(optedInIds)}&${prefColumn}=eq.true&select=user_id`,
+	);
+	const eligibleIds = uniq(prefRows.map((r) => r.user_id));
+	if (eligibleIds.length === 0) return { tokens: [], teamOptIns: optedInIds.length, prefEligible: 0 };
+
+	const tokenRows = await rest<{ token: string }>(
+		cfg,
+		`device_tokens?user_id=in.${inList(eligibleIds)}&select=token`,
+	);
+	return { tokens: uniq(tokenRows.map((r) => r.token)), teamOptIns: optedInIds.length, prefEligible: eligibleIds.length };
+}
+
+/** One NT event's fan-out request for the BATCHED competition lookup (`followKeys` = ["nt:USA","nt:ESP"]). */
+export interface CompetitionTokenRequest {
+	id: string;
+	followKeys: string[];
+	prefColumn: PrefColumn;
+}
+
+/** BATCHED NT per-event V1 fan-out — the competition twin of resolveTokensBatch (3 REST per DISTINCT pref
+ *  column per tick, not 3 per event). The NT loop used to look up tokens per event inline, the exact
+ *  unbatched shape the stress test flags for an 8-match FIFA-window kickoff/HT cluster. The partition tail
+ *  is shared with the club batch: a follow_key plays the role of a team_id (same either-side OR). */
+export async function resolveCompetitionTokensBatch(
+	cfg: SupabaseConfig,
+	requests: CompetitionTokenRequest[],
+): Promise<Map<string, string[]>> {
+	const out = new Map<string, string[]>();
+	if (requests.length === 0) return out;
+	const byPref = new Map<PrefColumn, CompetitionTokenRequest[]>();
+	for (const r of requests) {
+		if (!PREF_COLUMNS.includes(r.prefColumn)) throw new Error(`Unknown pref column: ${r.prefColumn}`);
+		const g = byPref.get(r.prefColumn);
+		if (g) g.push(r);
+		else byPref.set(r.prefColumn, [r]);
+	}
+	for (const [prefColumn, group] of byPref) {
+		const keys = uniq(group.flatMap((r) => r.followKeys));
+		const empty = () => { for (const r of group) out.set(r.id, []); };
+		if (keys.length === 0) { empty(); continue; }
+		const alertRows = await rest<{ user_id: string; follow_key: string }>(
+			cfg,
+			`competition_alert_preferences?follow_key=in.${inListQuoted(keys)}&alerts_enabled=eq.true&select=user_id,follow_key`,
+		);
+		const optedIds = uniq(alertRows.map((r) => r.user_id));
+		if (optedIds.length === 0) { empty(); continue; }
+		const prefRows = await rest<{ user_id: string }>(
+			cfg,
+			`notification_preferences?user_id=in.${inList(optedIds)}&${prefColumn}=eq.true&select=user_id`,
+		);
+		const eligibleIds = uniq(prefRows.map((r) => r.user_id));
+		if (eligibleIds.length === 0) { empty(); continue; }
+		const tokenRows = await rest<{ user_id: string; token: string }>(
+			cfg,
+			`device_tokens?user_id=in.${inList(eligibleIds)}&select=user_id,token`,
+		);
+		partitionEventTokens(
+			group.map((r) => ({ id: r.id, teamIds: r.followKeys, prefColumn: r.prefColumn })),
+			alertRows.map((a) => ({ user_id: a.user_id, team_id: a.follow_key })),
+			eligibleIds,
+			tokenRows,
+			out,
+		);
+	}
+	return out;
+}
+
+/** Which of `followKeys` ("nt:USA", …) have at least one follower with the country bell ON — ONE REST call.
+ *  The NT ESPN-footprint gate: the /summary-dependent extras (lineup poll, goal cross-check, VAR / knockout
+ *  re-poll) run only for NT matches someone actually follows, so a 30-match FIFA window never turns into
+ *  30 per-minute /summary fetches for matches with no audience. */
+export async function followedCompetitionKeys(cfg: SupabaseConfig, followKeys: string[]): Promise<Set<string>> {
+	if (followKeys.length === 0) return new Set();
+	const rows = await rest<{ follow_key: string }>(
+		cfg,
+		`competition_alert_preferences?follow_key=in.${inListQuoted(uniq(followKeys))}&alerts_enabled=eq.true&select=follow_key`,
+	);
+	return new Set(rows.map((r) => r.follow_key));
 }
 
 /** Shared tail of the fan-out: given the per-team opted-in user ids, gate by the per-event pref
