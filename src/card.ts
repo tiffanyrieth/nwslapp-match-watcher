@@ -20,6 +20,7 @@ import resvgWasm from "@resvg/resvg-wasm/index_bg.wasm";
 import inter400 from "./fonts/inter-400.woff";
 import inter600 from "./fonts/inter-600.woff";
 import inter800 from "./fonts/inter-800.woff";
+import { ntColorHex } from "./livestate";
 
 interface CardEnv {
 	/** Service binding to the sibling proxy worker — its GET /crest/{ABBR} serves the
@@ -162,6 +163,37 @@ async function crestDataUri(env: CardEnv, abbr: string, espnId: string | undefin
 	}
 	console.log(`[card] crest fallback to ring+abbr for ${abbr}`);
 	return null;
+}
+
+/** A national team's FLAG as a data URI, for the NT push thumbnail. Source = the proxy's `/national-teams`
+ *  directory (ESPN's own country-flag href keyed by the SAME FIFA code the push carries — no FIFA→ISO
+ *  translation that could mis-flag a team; 24h edge-cached), then that image. NOT the club crest store:
+ *  it's keyed by abbreviation and CHI/DEN/POR collide with NWSL clubs. null → the ring+abbr fallback. */
+export async function flagDataUri(env: CardEnv, abbr: string): Promise<string | null> {
+	try {
+		const dir = await env.PROXY.fetch("https://proxy/national-teams");
+		if (!dir.ok) {
+			console.log(`[card] DIAG flag directory → ${dir.status} (${abbr}) — ring fallback`);
+			return null;
+		}
+		const teams = (await dir.json()) as Array<{ code?: string; flag?: string }>;
+		const href = teams.find((t) => t.code?.toUpperCase() === abbr.toUpperCase())?.flag;
+		if (!href) {
+			console.log(`[card] DIAG no flag for ${abbr} in /national-teams — ring fallback`);
+			return null;
+		}
+		const res = await fetch(href);
+		if (!res.ok) {
+			console.log(`[card] DIAG flag image ${href} → ${res.status} (${abbr}) — ring fallback`);
+			return null;
+		}
+		const bytes = new Uint8Array(await res.arrayBuffer());
+		if (bytes.byteLength === 0) return null;
+		return `data:${res.headers.get("content-type") || "image/png"};base64,${base64(bytes)}`;
+	} catch (err) {
+		console.log(`[card] DIAG flag fetch threw for ${abbr}: ${err} — ring fallback`);
+		return null;
+	}
 }
 
 // Minimal hyperscript so we can build satori's element tree without JSX/runtime.
@@ -385,8 +417,11 @@ export async function handleThumb(request: Request, env: CardEnv, ctx: Execution
 
 	try {
 		await ensureWasm();
-		const crest = await crestDataUri(env, abbr, url.searchParams.get("id") ?? undefined);
-		const a = accent(abbr);
+		// `?nt=1` = a national-team event: the country FLAG on the NT-color wash (NT palette FIRST — the club
+		// palette would paint Chile in Chicago's colors). Everything else is the club crest tile, unchanged.
+		const national = url.searchParams.get("nt") === "1";
+		const crest = national ? await flagDataUri(env, abbr) : await crestDataUri(env, abbr, url.searchParams.get("id") ?? undefined);
+		const a = national ? `#${ntColorHex(abbr)}` : accent(abbr);
 		const S = 512;
 		// Full-bleed tile: dark card surface with a diagonal team-color wash (same DNA as the
 		// match card / schedule cards). Crest at ~86% of the tile; ring+abbr fallback only.
@@ -411,7 +446,9 @@ export async function handleThumb(request: Request, env: CardEnv, ctx: Execution
 						// the 512 tile clips ~27px/side of SOURCE — transparent pixels only (27 < 41 for every
 						// club) — so the ART lands at ~94% of the tile instead of ~72%. If the crest set is
 						// ever regenerated with different margins, re-measure before touching this number.
-						{ type: "img", props: { src: crest, width: 573, height: 573, style: { objectFit: "contain", flexShrink: 0 } } }
+						// Flags: ESPN's 500px country PNG already fills ~92% of its canvas, so NO overscan (it would clip
+						// the flag itself) — ~470px lands the flag edge-to-edge-ish like the crest art.
+						{ type: "img", props: { src: crest, width: national ? 470 : 573, height: national ? 470 : 573, style: { objectFit: "contain", flexShrink: 0 } } }
 					: el(
 							"div",
 							{

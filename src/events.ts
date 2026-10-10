@@ -220,6 +220,10 @@ export interface MatchEvent {
 	 *  (We never know WHICH goal/scorer was reversed — ESPN doesn't say — only that the score dropped.) */
 	prevHomeScore?: number;
 	prevAwayScore?: number;
+	/** National-team match (fans out by `nt:<FIFA code>`, not club id). Drives the push thumbnail to the
+	 *  country FLAG tile — the club crest store is keyed by abbreviation, and CHI/DEN/POR collide with NWSL
+	 *  clubs (a Chile goal would otherwise ship the Chicago crest). */
+	national?: boolean;
 }
 
 function toScore(raw?: string): number {
@@ -938,7 +942,8 @@ export function eventCarriesCrest(type: MatchEventType): boolean {
 export function thumbUrl(cardBase: string, event: MatchEvent): string {
 	// ?s= is a STYLE VERSION cache-buster: /thumb responses edge-cache 24h keyed by full URL, so a
 	// tile-design change must bump this or devices keep pulling the old look until the cache expires.
-	return `${cardBase.replace(/\/$/, "")}/thumb/${encodeURIComponent(crestAbbr(event))}?s=3`;
+	const nt = event.national ? "&nt=1" : "";
+	return `${cardBase.replace(/\/$/, "")}/thumb/${encodeURIComponent(crestAbbr(event))}?s=3${nt}`;
 }
 
 /** Per-event interruption level: goals/VAR/kickoff/full-time punch through Focus modes

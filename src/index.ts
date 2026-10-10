@@ -49,7 +49,7 @@ import { fulltimeSubtitle, knockoutFTNeedsConfirm, mergePlays, summaryScoringPla
 // so its cold-start module-eval never touches this cron's per-tick CPU budget — the fix for the
 // "Exceeded CPU Time Limits" errors. This worker only builds card URLs (CARD_PUBLIC_URL) and
 // 302-redirects any /card request that lands here (late-delivered pushes carry the old origin).
-import { activityTokensForMatch, allDeviceTokens, allStartTokens, markPredictResultNotified, predictResultRecipients, resolveTokensBatch, resolveTokensForEvent, startTokensByCompetitionKey, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
+import { activityTokensForMatch, allDeviceTokens, allStartTokens, followedCompetitionKeys, markPredictResultNotified, predictResultRecipients, resolveCompetitionTokensBatch, resolveCompetitionTokensForEvent, resolveTokensBatch, resolveTokensForEvent, startTokensByCompetitionKey, startTokensForTeams, tokensForCompetitionEvent, tokensForEvent, type SupabaseConfig } from "./supabase";
 import { activeFeeds, buildIndex, CLUB_FEEDS, clubEventLabel, DISCOVERY_INTERVAL_MS, discoveryDue, FEED_LABEL, kickoffMs, liveMissedByIndex, NWSL_FEED, reconcileFeed, type FixtureIndex } from "./fixtures";
 import { buildStartAps, endLiveActivity, liveTopic, startLiveActivity, updateLiveActivity, type LiveContentState, type LivePhase } from "./activitykit";
 import { attributesFor, contentStateFromMatch, preContentState, upcomingInfo } from "./livestate";
@@ -161,6 +161,22 @@ const MATCH_STATE_TTL = 21600; // 6h — auto-expires a match's KV entry after i
  *  kickoff cluster rolls its overflow to the NEXT tick (no marker set → retried), which the
  *  20-min start lead absorbs invisibly. Bounds channel-create externals per invocation. */
 const NT_STARTS_PER_TICK = 8;
+
+/** Max NT `/summary` fetches (live goal cross-checks + lineup polls) per POLL. Only FOLLOWED NT matches
+ *  qualify at all (see the footprint gate in runWatch); this just bounds a pathological FIFA window.
+ *  A followed NT match costs exactly what a club match does — /summary rides the proxy service binding
+ *  (internal budget), and the ESPN-side cost per match equals the club path's. */
+const NT_SUMMARY_PER_POLL = 12;
+
+/** Which follower table a match fans out to: club ids (`team_alert_preferences`) or FIFA follow keys
+ *  (`competition_alert_preferences`, "nt:USA"). Everything else about a match is processed identically. */
+type Audience = "club" | "nt";
+interface MatchWork {
+	event: ScoreboardEvent;
+	/** Source feed slug — drives the competition label and every `/summary?league=` / re-poll `league=`. */
+	feed: string;
+	audience: Audience;
+}
 
 // Fan-out early-warning threshold. Cloudflare's free plan caps a single cron invocation at 50 external
 // subrequests; each APNs push is one, plus ~8+ feed fetches per tick — so a single event with more than
@@ -310,6 +326,29 @@ async function flushClubV1(env: Env, sb: SupabaseConfig, pending: MatchEvent[]):
 				tokenMap.set(tag(ev), await tokensForEvent(sb, ev.teamIds, ev.prefColumn));
 			} catch (e) {
 				console.log(`[watcher] per-event fallback failed (${ev.type} ${ev.eventId}): ${e}`);
+			}
+		}
+	}
+	for (const ev of pending) await enqueueV1(env, ev, tokenMap.get(tag(ev)) ?? []);
+}
+
+/** The national-team twin of flushClubV1: ONE batched competition lookup for every NT V1 event this
+ *  tick (was a per-event inline lookup, 3 REST each — the unbatched shape the stress test flags for a
+ *  FIFA-window kickoff/HT cluster). Same per-event fallback on a batch failure. */
+async function flushNationalV1(env: Env, sb: SupabaseConfig, pending: MatchEvent[]): Promise<void> {
+	if (pending.length === 0) return;
+	const tag = (ev: MatchEvent) => `${ev.eventId}:${ev.type}`;
+	let tokenMap: Map<string, string[]>;
+	try {
+		tokenMap = await resolveCompetitionTokensBatch(sb, pending.map((ev) => ({ id: tag(ev), followKeys: ntKeys(ev), prefColumn: ev.prefColumn })));
+	} catch (err) {
+		console.log(`[watcher] batched NT follower lookup failed — per-event fallback: ${err}`);
+		tokenMap = new Map();
+		for (const ev of pending) {
+			try {
+				tokenMap.set(tag(ev), await tokensForCompetitionEvent(sb, ntKeys(ev), ev.prefColumn));
+			} catch (e) {
+				console.log(`[watcher] NT per-event fallback failed (${ev.type} ${ev.eventId}): ${e}`);
 			}
 		}
 	}
@@ -690,7 +729,7 @@ const DISCOVERY_HOURS = DISCOVERY_INTERVAL_MS / 3_600_000;
  * the proxy's ~30s live cache and just re-read the same (possibly glitched) payload — making the
  * debounce a no-op. Returns null on fetch failure or if the event is no longer present.
  */
-async function refetchMatch(env: Env, eventId: string): Promise<Match | null> {
+async function refetchMatch(env: Env, eventId: string, feed: string = NWSL_FEED): Promise<Match | null> {
 	try {
 		// ⚠️ NO `&limit=500` on any WINDOWED scoreboard poll (this + fetchFeed + the predict-results read):
 		// `limit=500` is the "schedule-extraction" shape ESPN serves from its 25–47-min-STALE cache — even
@@ -699,7 +738,10 @@ async function refetchMatch(env: Env, eventId: string): Promise<Match | null> {
 		// 62'. A yesterday→tomorrow window is ≤~18 events, far under ESPN's 100 default, so limit is never
 		// needed here. The proxy also strips it (proxyScoreboardWindow); this is the watcher-side
 		// belt-and-suspenders. The proxy's own full-season load keeps its limit. See docs/backend.md.
-		const url = `${PROXY_SCOREBOARD}?dates=${scoreboardWindow()}&_cb=${Date.now()}`;
+		// The match's OWN feed: without `league=` this re-read only ever saw NWSL, so a cup or national-team
+		// match never re-found itself (recheck=null) and its VAR / knockout confirm silently degraded.
+		const league = feed === NWSL_FEED ? "" : `league=${encodeURIComponent(feed)}&`;
+		const url = `${PROXY_SCOREBOARD}?${league}dates=${scoreboardWindow()}&_cb=${Date.now()}`;
 		const res = await env.PROXY.fetch(url, { headers: { Accept: "application/json" } });
 		if (!res.ok) {
 			console.log(`[watcher] correction re-poll failed: ${res.status}`);
@@ -828,18 +870,64 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	const labelFor = (event: ScoreboardEvent): string =>
 		clubEventLabel(eventFeed.get(event.id) ?? NWSL_FEED, event);
 
+	// Every national-team event polled this tick, tagged with its feed — they run through the SAME
+	// per-match pipeline as club matches below (processMatch), fanned out by `nt:<FIFA code>`.
+	const ntWork: MatchWork[] = [];
+	for (const slug of NT_LEAGUES) {
+		for (const event of feedEvents.get(slug) ?? []) ntWork.push({ event, feed: slug, audience: "nt" });
+	}
+
 	// Is any match in the live window (in-progress or near kickoff, excluding finished)? This is the
-	// signal `scheduled` uses to fire a second 30s poll this minute. Computed over the club scoreboard;
-	// the NT loop below ORs in any live NT match so an international window also gets the fast cadence.
-	let liveInWindow = events.some((event) => {
+	// signal `scheduled` uses to fire a second 30s poll this minute. Club AND national matches use the
+	// same rule (an NT match used to count even once finished, keeping the 30s cadence on for 4.5h).
+	const inLiveWindow = (event: ScoreboardEvent): boolean => {
 		const ko = kickoffMs(event);
 		if (ko === null || now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) return false;
 		const state = event.status?.type?.state ?? event.competitions?.[0]?.status?.type?.state;
 		return state === "in" || state === "pre";
-	});
+	};
+	const liveInWindow = events.some(inLiveWindow) || ntWork.some((w) => inLiveWindow(w.event));
 
 	const sb = supabaseConfig(env);
 	const apns = apnsConfig(env);
+
+	// NT ESPN-FOOTPRINT GATE. A FIFA window can carry ~30 simultaneous NT matches; giving every one the club
+	// path's per-minute /summary (lineup poll, goal cross-check, VAR/knockout re-poll) would be a new
+	// extraction-shaped load with no audience behind most of it. So those extras run only for NT matches
+	// where either country has ≥1 follower with the bell ON — ONE batched REST per tick, and only when an
+	// NT match is inside [KO−75m … KO+4.5h]. Unfollowed NT matches keep scoreboard-only detection (they have
+	// no recipients anyway). Fails CLOSED on a lookup error (scoreboard-only this tick) — loud, not silent.
+	let ntFollowed = new Set<string>();
+	const ntGateKeys = new Set<string>();
+	for (const { event } of ntWork) {
+		const ko = kickoffMs(event);
+		if (ko === null || now - ko > WINDOW_PAST_MS || ko - now > LINEUP_LEAD_MS) continue;
+		const info = upcomingInfo(event);
+		if (info) { ntGateKeys.add(`nt:${info.homeAbbr}`); ntGateKeys.add(`nt:${info.awayAbbr}`); }
+	}
+	if (ntGateKeys.size > 0) {
+		try {
+			ntFollowed = await followedCompetitionKeys(sb, [...ntGateKeys]);
+		} catch (err) {
+			console.log(`[watcher] DIAG NT follower gate lookup failed — NT matches scoreboard-only this tick: ${err}`);
+		}
+	}
+	const ntIsFollowed = (event: ScoreboardEvent): boolean => {
+		const info = upcomingInfo(event);
+		return !!info && (ntFollowed.has(`nt:${info.homeAbbr}`) || ntFollowed.has(`nt:${info.awayAbbr}`));
+	};
+	// Per-poll ceiling on NT /summary work (live cross-checks + lineup polls). A followed NT match costs
+	// exactly what a club match does; this only bounds a pathological window. Overflow → scoreboard-only
+	// this poll (retried next poll), logged.
+	let ntSummaryUsed = 0;
+	const takeNtSummary = (matchId: string): boolean => {
+		if (ntSummaryUsed >= NT_SUMMARY_PER_POLL) {
+			console.log(`[watcher] DIAG NT /summary budget (${NT_SUMMARY_PER_POLL}) reached — ${matchId} scoreboard-only this poll`);
+			return false;
+		}
+		ntSummaryUsed++;
+		return true;
+	};
 
 	// Collect club V1 events across ALL matches this tick, then do ONE batched follower lookup after the
 	// loop (flushClubV1) — an inline per-event lookup (3 REST each) breaches the 50-external subrequest cap
@@ -851,7 +939,7 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	// wall time ~the slowest single match instead of the SUM. That's what holds a full 6–7 game slate
 	// under the ~30s per-invocation ceiling. Detected events are RETURNED and collected for the one
 	// batched follower lookup below (flushClubV1), so concurrency never changes what fires or its order.
-	const processClubMatch = async (event: ScoreboardEvent): Promise<MatchEvent[]> => {
+	const processMatch = async ({ event, feed, audience }: MatchWork): Promise<MatchEvent[]> => {
 		// Live-window gate (cheap, no I/O) before any KV read.
 		const ko = kickoffMs(event);
 		if (ko === null || now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) return [];
@@ -860,7 +948,10 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 		if (!match) return [];
 		// Competition label (from the source feed) — read only by the kickoff subtitle, so a cup
 		// kickoff push says which competition it is. parseMatch can't know the feed; set it here.
-		match.competition = labelFor(event);
+		match.competition = audience === "club" ? labelFor(event) : (FEED_LABEL[feed] ?? "International");
+		// Club matches always get the /summary-backed extras; an NT match only when someone follows it
+		// (the footprint gate above). `extras` false = the old NT behavior: scoreboard-only detection.
+		const extras = audience === "club" || ntIsFollowed(event);
 
 		const key = `match:${match.eventId}`;
 		const prev = await env.MATCH_STATE.get<StoredState>(key, "json");
@@ -877,9 +968,8 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 		// It only RAISES — the scoreboard stays authoritative for VAR DECREASES, which still flow through the
 		// correction path below (the "NO GOAL · VAR review" push is kept intentionally — VAR is part of the
 		// game, owner 2026-09-05).
-		if (match.state === "in") {
+		if (match.state === "in" && extras && (audience === "club" || takeNtSummary(match.eventId))) {
 			try {
-				const feed = eventFeed.get(event.id) ?? NWSL_FEED;
 				const leagueParam = feed === NWSL_FEED ? "" : `&league=${encodeURIComponent(feed)}`;
 				// Cache-bust ONLY on the 2nd poll — mirroring /scoreboard's own `_cb` pattern (2026-09-12 audit).
 				// The proxy caches /summary on the FULL URL and never strips `_lc`, so a per-poll `_lc=${now}` gave
@@ -916,14 +1006,18 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 		}
 
 		let detected = detectEvents(prev, match);
+		if (audience === "nt") detected = detected.map((e) => ({ ...e, national: true }));
 
 		// One V1 fan-out (follower lookup → enqueue) — shared by normal events and the VAR correction.
 		// Delivery + prune happen in the queue consumer; here we only look up tokens and enqueue, so the
 		// cron tick never touches the 50-external subrequest cap regardless of follower count.
-		const fireV1 = async (ev: MatchEvent): Promise<void> => {
+		const fireV1 = async (raw: MatchEvent): Promise<void> => {
+			const ev = audience === "nt" ? { ...raw, national: true } : raw;
 			let tokens: string[];
 			try {
-				tokens = await tokensForEvent(sb, ev.teamIds, ev.prefColumn);
+				tokens = audience === "club"
+					? await tokensForEvent(sb, ev.teamIds, ev.prefColumn)
+					: await tokensForCompetitionEvent(sb, ntKeys(ev), ev.prefColumn);
 			} catch (err) {
 				console.log(`[watcher] follower lookup failed (${ev.type} ${ev.eventId}): ${err}`);
 				return;
@@ -936,13 +1030,13 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 		// then re-polling a FRESH scoreboard. Only a persisting decrease fires (brief items 2–3).
 		let effectiveMatch = match; // the snapshot we persist + sync the Live Activity from
 		let correctionFired = false;
-		const candidate = detectCorrectionCandidate(prev, match);
+		const candidate = extras ? detectCorrectionCandidate(prev, match) : null;
 		if (candidate) {
 			console.log(
 				`[watcher] correction candidate ${match.eventId}: ${candidate.prev.home}-${candidate.prev.away} → ${match.home.score}-${match.away.score}; debouncing ${CORRECTION_DEBOUNCE_MS}ms`,
 			);
 			await sleep(CORRECTION_DEBOUNCE_MS);
-			const recheck = await refetchMatch(env, match.eventId);
+			const recheck = await refetchMatch(env, match.eventId, feed);
 			if (recheck) effectiveMatch = recheck; // freshest truth → baseline + LA from it, fired or not
 			if (confirmCorrection(candidate, recheck)) {
 				await fireV1(correctionEvent(candidate.prev, recheck!));
@@ -972,12 +1066,12 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 		// suspension class). Same shape as the VAR debounce: wait, re-poll FRESH, act on what persists. This is
 		// IN-TICK on purpose — a cross-tick hold can't work, because reconcileFeed already marked the fixture
 		// `ended` from this payload and the feed would stop being polled (never re-seen ⇒ FT never fires).
-		if (knockoutFTNeedsConfirm(prev, match)) {
+		if (extras && knockoutFTNeedsConfirm(prev, match)) {
 			console.log(
 				`[watcher] knockout FT candidate ${match.eventId}: level ${match.home.score}-${match.away.score}, no shootout tally (${match.competition}); confirming after ${CORRECTION_DEBOUNCE_MS}ms`,
 			);
 			await sleep(CORRECTION_DEBOUNCE_MS);
-			const recheck = await refetchMatch(env, match.eventId);
+			const recheck = await refetchMatch(env, match.eventId, feed);
 			if (recheck) recheck.competition = match.competition;
 			if (recheck && recheck.state === "in") {
 				// Flicker: play continues (extra time / shootout). Withdraw FT, baseline + LA-sync from the live
@@ -1035,74 +1129,33 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 
 	// Fan the matches out with bounded concurrency, then collect every detected event for the ONE batched
 	// follower lookup below. Order-independent: concurrency changes only the WALL TIME, not what fires.
-	const detectedPerMatch = await mapLimit(events, MATCH_CONCURRENCY, processClubMatch);
-	for (const list of detectedPerMatch) for (const ev of list) pendingV1.push(ev);
+	// ONE pipeline for club and national matches (2026-10-10, NT parity): the NT loop used to be a thinner
+	// copy — no lineup push, no /summary goal cross-check / scorer, no VAR debounce, no knockout FT confirm,
+	// no competition label, per-event inline follower lookups. Now every match runs processMatch; only the
+	// AUDIENCE differs (club id vs `nt:<FIFA code>`), and the /summary extras are follower-gated for NT.
+	const work: MatchWork[] = [
+		...events.map((event): MatchWork => ({ event, feed: eventFeed.get(event.id) ?? NWSL_FEED, audience: "club" })),
+		...ntWork,
+	];
+	const detectedPerMatch = await mapLimit(work, MATCH_CONCURRENCY, processMatch);
+	const pendingNT: MatchEvent[] = [];
+	detectedPerMatch.forEach((list, i) => {
+		for (const ev of list) (work[i].audience === "club" ? pendingV1 : pendingNT).push(ev);
+	});
 
-	// One batched follower lookup for every club V1 event detected across the loop above (see flushClubV1) —
-	// keeps the tick's external-subrequest count flat regardless of how many matches fire together.
+	// One batched follower lookup per audience for every V1 event detected above (see flushClubV1 /
+	// flushNationalV1) — keeps the tick's external-subrequest count flat however many matches fire together.
 	await flushClubV1(env, sb, pendingV1);
+	await flushNationalV1(env, sb, pendingNT);
 
-	// NATIONAL-TEAM pass: the same event detection (kickoff/goal/HT/FT), but fanned out by FIFA code to
-	// `competition_alert_preferences` instead of the club table. V1 push only — NT Live Activities (V2)
-	// and the VAR-correction debounce are deferred (kept the club-only path). Reuses `jwt`/`sb`/`apns`.
-	// FIXTURE-WINDOW: a feed appears in `feedEvents` only when it was actually polled this tick
-	// (a fixture in window, or the discovery sweep) — an off-tournament feed costs ZERO fetches now,
-	// not just zero KV work.
-	// NT V2 LA start candidates — COLLECTED here, batched into ONE token lookup after the loop
-	// (startNationalActivities). Never call the per-match lookup inside this loop: a FIFA-window
-	// kickoff cluster × 3 REST calls each is the exact 50-external breach the stress test flagged.
+	// NT V2 LA start candidates — COLLECTED here, batched into ONE token lookup (startNationalActivities).
+	// Never call the per-match lookup inside a loop: a FIFA-window kickoff cluster × 3 REST calls each is
+	// the exact 50-external breach the stress test flagged. Its OWN ≤20-min pre-kickoff window. All NTs.
 	const ntStartCandidates: Array<{ event: ScoreboardEvent; ko: number; label: string }> = [];
-	for (const slug of NT_LEAGUES) {
-		const ntEvents = feedEvents.get(slug);
-		if (!ntEvents) continue;
-		for (const event of ntEvents) {
-			const ko = kickoffMs(event);
-			if (ko === null) continue;
-
-			// NT V2 push-to-start — its OWN ≤20-min pre-kickoff window (wider than the live gate below,
-			// which excludes future matches). All NTs (2026-08-06); audience-gated by follow keys.
-			if (ko >= now && ko - now <= LA_START_LEAD_MS) {
-				ntStartCandidates.push({ event, ko, label: FEED_LABEL[slug] ?? "International" });
-			}
-
-			// Live-window gate for V1 detection + V2 broadcast sync.
-			if (now - ko > WINDOW_PAST_MS || ko - now > WINDOW_FUTURE_MS) continue;
-			liveInWindow = true; // an in-window NT match → give the international window the 30s cadence too
-			const match = parseMatch(event);
-			if (!match) continue;
-			const key = `match:${match.eventId}`;
-			const prev = await env.MATCH_STATE.get<StoredState>(key, "json");
-			if (match.state === "post" && !prev) continue;
-
-			const detected = detectEvents(prev, match);
-			for (const ev of detected) {
-				let tokens: string[];
-				try {
-					tokens = await tokensForCompetitionEvent(sb, ntKeys(ev), ev.prefColumn);
-				} catch (err) {
-					console.log(`[watcher] NT follower lookup failed (${ev.type} ${ev.eventId}): ${err}`);
-					continue;
-				}
-				await enqueueV1(env, ev, tokens); // same V1 message shape; tokens are device_tokens, pruned there
-			}
-
-			// State (with the monotonic clock anchor, like the club pass) for the KV write + NT V2 sync.
-			const ntNext = nextState(prev, match, detected, Math.floor(Date.now() / 1000));
-
-			// NT V2 broadcast sync — mirrors the club syncLiveActivity, for EVERY NT match (2026-08-06;
-			// was USWNT-gated). syncLiveActivity SELF-GATES on channel existence (its first KV read
-			// returns undefined unless push-to-start created `la-chan:{id}`) — so a match nobody
-			// LA-follows costs one KV read and zero APNs work. That check is the correct predicate;
-			// an abbr gate here would just duplicate it.
-			try {
-				await syncLiveActivity(env, apns, match, detected.length > 0, ntNext.virtualKickoff);
-			} catch (err) {
-				console.log(`[watcher] NT LA sync failed (${match.eventId}): ${err}`);
-			}
-
-			if (match.state === "post") await env.MATCH_STATE.delete(key);
-			// Same change-guard as the club pass — skip re-writing an identical NT state every tick.
-			else if (!prev || !sameStoredState(prev, ntNext)) await env.MATCH_STATE.put(key, JSON.stringify(ntNext), { expirationTtl: MATCH_STATE_TTL });
+	for (const { event, feed } of ntWork) {
+		const ko = kickoffMs(event);
+		if (ko !== null && ko >= now && ko - now <= LA_START_LEAD_MS) {
+			ntStartCandidates.push({ event, ko, label: FEED_LABEL[feed] ?? "International" });
 		}
 	}
 
@@ -1126,7 +1179,9 @@ async function runWatch(env: Env, cacheBust = false): Promise<boolean> {
 	// SEPARATE pass: poll /summary for matches in the pre-kickoff window and push "Lineups in" once
 	// both starting XIs are posted. KV-deduped; isolated so a /summary hiccup can't break score alerts.
 	try {
-		await checkUpcomingLineups(env, events, sb, apns, (ev) => eventFeed.get(ev.id) ?? NWSL_FEED);
+		// Club matches + FOLLOWED NT matches (the footprint gate — an unfollowed NT match has no recipients).
+		const lineupWork = work.filter((w) => w.audience === "club" || ntIsFollowed(w.event));
+		await checkUpcomingLineups(env, lineupWork, sb, apns, takeNtSummary);
 	} catch (err) {
 		console.log(`[watcher] lineup pass failed: ${err}`);
 	}
@@ -1791,20 +1846,18 @@ async function maybeRunKnowHerPublishPass(env: Env): Promise<void> {
  *  the pre-kickoff window, poll the per-match `/summary` and, the tick BOTH starting XIs are posted, push
  *  a one-shot "Lineups in" alert to everyone with `lineup_posted` on for a participating team. KV-deduped.
  *  `/summary` is fetched CACHE-BUSTED so detection sees ESPN's live state each tick (independent of the
- *  proxy's pre-kickoff TTL), firing within ≤60s of the post. CLUB feeds only (league + cups, via the
- *  merged event list — cup fixtures pass their league slug to /summary); NT feeds stay excluded
- *  (they'd multiply the per-minute /summary fetches). */
+ *  proxy's pre-kickoff TTL), firing within ≤60s of the post. Club feeds (league + cups) AND national teams
+ *  (2026-10-10 — was club-only, so a followed country's lineup never pushed): the caller passes only
+ *  FOLLOWED NT matches, and each NT match's /summary poll draws on the per-poll NT budget. */
 async function checkUpcomingLineups(
 	env: Env,
-	events: ScoreboardEvent[],
+	work: MatchWork[],
 	sb: SupabaseConfig,
 	apns: ApnsConfig,
-	// Source feed per event: cup fixtures need `/summary?league=<slug>` (the proxy's summary is
-	// NWSL by default; league param added 2026-08-06). NWSL omits the param — old behavior exactly.
-	feedFor: (event: ScoreboardEvent) => string = () => NWSL_FEED,
+	takeNtSummary: (matchId: string) => boolean = () => true,
 ): Promise<void> {
 	const now = Date.now();
-	for (const event of events) {
+	for (const { event, feed, audience } of work) {
 		const ko = kickoffMs(event);
 		if (ko === null || ko < now || ko - now > LINEUP_LEAD_MS) continue;
 		const info = upcomingInfo(event);
@@ -1822,9 +1875,9 @@ async function checkUpcomingLineups(
 		const pubKey = `lineup-pub:${info.matchId}`;
 		let published = (await env.MATCH_STATE.get(pubKey)) !== null;
 		if (!published) {
-			// Cache-busted so we see ESPN's live state, not a cached pre-lineup shell. Cup fixtures
+			// Cache-busted so we see ESPN's live state, not a cached pre-lineup shell. Cup + NT fixtures
 			// carry their league slug; NWSL omits it (proxy default — unchanged old behavior).
-			const feed = feedFor(event);
+			if (audience === "nt" && !takeNtSummary(info.matchId)) continue; // over budget — next poll
 			const leagueParam = feed === NWSL_FEED ? "" : `&league=${encodeURIComponent(feed)}`;
 			let summary: unknown;
 			try {
@@ -1834,7 +1887,7 @@ async function checkUpcomingLineups(
 				if (!res.ok) {
 					// NO SILENT FAILURES: a cup summary that 400s/404s (ESPN may not serve rosters for
 					// every competition) must be observable, not a quiet no-lineups-push.
-					if (feed !== NWSL_FEED) console.log(`[watcher] DIAG cup lineup summary ${res.status} (${feed}/${info.matchId}) — no lineup push for this match`);
+					if (feed !== NWSL_FEED) console.log(`[watcher] DIAG ${audience === "nt" ? "NT" : "cup"} lineup summary ${res.status} (${feed}/${info.matchId}) — no lineup push for this match`);
 					continue;
 				}
 				summary = await res.json();
@@ -1859,11 +1912,14 @@ async function checkUpcomingLineups(
 			awayAbbr: info.awayAbbr,
 			homeScore: 0,
 			awayScore: 0,
+			national: audience === "nt" || undefined,
 		};
 
 		let recipients;
 		try {
-			recipients = await resolveTokensForEvent(sb, [info.homeId, info.awayId], "lineup_posted");
+			recipients = audience === "club"
+				? await resolveTokensForEvent(sb, [info.homeId, info.awayId], "lineup_posted")
+				: await resolveCompetitionTokensForEvent(sb, [`nt:${info.homeAbbr}`, `nt:${info.awayAbbr}`], "lineup_posted");
 		} catch (err) {
 			console.log(`[watcher] lineup follower lookup failed (${info.matchId}): ${err}`);
 			continue; // don't mark KV — retry next tick so a transient lookup failure doesn't drop the alert
