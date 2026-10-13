@@ -26,6 +26,14 @@ test("batch URL: bust flag only when asked, ids deduped (first wins)", () => {
 	assert.deepEqual(urls, ["https://proxy/watch/summaries?e=1:usa.nwsl,2:fifa.friendly.w:1"]);
 });
 
+test("batch URL: fake-match / non-numeric ids are never sent (no call at all if nothing real is wanted)", () => {
+	assert.deepEqual(summaryBatchUrls([{ id: "fakematch-1791929352530", league: "usa.nwsl", bust: false }]), []);
+	assert.deepEqual(
+		summaryBatchUrls([{ id: "fakematch-1", league: "usa.nwsl", bust: false }, { id: "5", league: "usa.nwsl", bust: false }]),
+		["https://proxy/watch/summaries?e=5:usa.nwsl"],
+	);
+});
+
 test("batch URL: chunks at SUMMARY_BATCH_MAX (= the proxy's cap), none for an empty list", () => {
 	assert.deepEqual(summaryBatchUrls([]), []);
 	const wants = Array.from({ length: SUMMARY_BATCH_MAX + 3 }, (_, i) => ({ id: String(i + 1), league: "fifa.wworldq.uefa", bust: false }));
