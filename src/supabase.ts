@@ -184,6 +184,9 @@ export interface EventTokenRequest {
 export async function resolveTokensBatch(
 	cfg: SupabaseConfig,
 	requests: EventTokenRequest[],
+	/** Optional: filled with each request's gate counts (FanoutResolution's teamOptIns/prefEligible) — the
+	 *  batched lineup pass needs them for its "SUSPICIOUS 0 recipients" diag. */
+	counts?: Map<string, EventGateCounts>,
 ): Promise<Map<string, string[]>> {
 	const out = new Map<string, string[]>();
 	if (requests.length === 0) return out;
@@ -200,6 +203,7 @@ export async function resolveTokensBatch(
 		const teamIds = uniq(group.flatMap((r) => r.teamIds));
 		if (teamIds.length === 0) {
 			for (const r of group) out.set(r.id, []);
+			if (counts) countEventGates(group, [], [], counts);
 			continue;
 		}
 		const alertRows = await rest<{ user_id: string; team_id: string }>(
@@ -209,6 +213,7 @@ export async function resolveTokensBatch(
 		const optedIds = uniq(alertRows.map((r) => r.user_id));
 		if (optedIds.length === 0) {
 			for (const r of group) out.set(r.id, []);
+			if (counts) countEventGates(group, alertRows, [], counts);
 			continue;
 		}
 		const prefRows = await rest<{ user_id: string }>(
@@ -216,6 +221,7 @@ export async function resolveTokensBatch(
 			`notification_preferences?user_id=in.${inList(optedIds)}&${prefColumn}=eq.true&select=user_id`,
 		);
 		const eligibleIds = uniq(prefRows.map((r) => r.user_id));
+		if (counts) countEventGates(group, alertRows, eligibleIds, counts);
 		if (eligibleIds.length === 0) {
 			for (const r of group) out.set(r.id, []);
 			continue;
@@ -259,6 +265,40 @@ export function partitionEventTokens(
 		const toks: string[] = [];
 		for (const u of users) for (const t of tokensByUser.get(u) ?? []) toks.push(t);
 		out.set(req.id, uniq(toks));
+	}
+	return out;
+}
+
+/** Per-request gate counts — the batched twin of resolveTokensForEvent's teamOptIns/prefEligible. */
+export interface EventGateCounts {
+	/** Users with alerts ON for either team / follow key. */
+	teamOptIns: number;
+	/** …of those, users with the event's pref column ON. */
+	prefEligible: number;
+}
+
+/** Pure (node-tested): for each request, how many distinct users opted into ANY of its teamIds, and how many
+ *  of those are pref-eligible — the same numbers resolveTokensForEvent reports for one event. Mutates +
+ *  returns `out`. */
+export function countEventGates(
+	requests: Array<{ id: string; teamIds: string[] }>,
+	alertRows: Array<{ user_id: string; team_id: string }>,
+	eligibleIds: string[],
+	out: Map<string, EventGateCounts> = new Map(),
+): Map<string, EventGateCounts> {
+	const eligible = new Set(eligibleIds);
+	const usersByTeam = new Map<string, Set<string>>();
+	for (const a of alertRows) {
+		const set = usersByTeam.get(a.team_id);
+		if (set) set.add(a.user_id);
+		else usersByTeam.set(a.team_id, new Set([a.user_id]));
+	}
+	for (const req of requests) {
+		const users = new Set<string>();
+		for (const tid of req.teamIds) for (const u of usersByTeam.get(tid) ?? []) users.add(u);
+		let prefEligible = 0;
+		for (const u of users) if (eligible.has(u)) prefEligible++;
+		out.set(req.id, { teamOptIns: users.size, prefEligible });
 	}
 	return out;
 }
@@ -420,6 +460,8 @@ export interface CompetitionTokenRequest {
 export async function resolveCompetitionTokensBatch(
 	cfg: SupabaseConfig,
 	requests: CompetitionTokenRequest[],
+	/** Optional per-request gate counts (see resolveTokensBatch). */
+	counts?: Map<string, EventGateCounts>,
 ): Promise<Map<string, string[]>> {
 	const out = new Map<string, string[]>();
 	if (requests.length === 0) return out;
@@ -432,19 +474,22 @@ export async function resolveCompetitionTokensBatch(
 	}
 	for (const [prefColumn, group] of byPref) {
 		const keys = uniq(group.flatMap((r) => r.followKeys));
+		const asTeams = group.map((r) => ({ id: r.id, teamIds: r.followKeys }));
 		const empty = () => { for (const r of group) out.set(r.id, []); };
-		if (keys.length === 0) { empty(); continue; }
+		if (keys.length === 0) { empty(); if (counts) countEventGates(asTeams, [], [], counts); continue; }
 		const alertRows = await rest<{ user_id: string; follow_key: string }>(
 			cfg,
 			`competition_alert_preferences?follow_key=in.${inListQuoted(keys)}&alerts_enabled=eq.true&select=user_id,follow_key`,
 		);
+		const asTeamRows = alertRows.map((a) => ({ user_id: a.user_id, team_id: a.follow_key }));
 		const optedIds = uniq(alertRows.map((r) => r.user_id));
-		if (optedIds.length === 0) { empty(); continue; }
+		if (optedIds.length === 0) { empty(); if (counts) countEventGates(asTeams, asTeamRows, [], counts); continue; }
 		const prefRows = await rest<{ user_id: string }>(
 			cfg,
 			`notification_preferences?user_id=in.${inList(optedIds)}&${prefColumn}=eq.true&select=user_id`,
 		);
 		const eligibleIds = uniq(prefRows.map((r) => r.user_id));
+		if (counts) countEventGates(asTeams, asTeamRows, eligibleIds, counts);
 		if (eligibleIds.length === 0) { empty(); continue; }
 		const tokenRows = await rest<{ user_id: string; token: string }>(
 			cfg,
