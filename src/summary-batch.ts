@@ -31,12 +31,18 @@ export interface SummaryResult {
 	body?: unknown;
 }
 
-/** Batch URLs for `wants` — deduped by event id (first want wins), chunked at SUMMARY_BATCH_MAX. */
+/** Only real ESPN event ids (digits) are batched. The fake-match harness uses `fakematch-<ms>` ids — it never had
+ *  an ESPN summary (the old per-match fetch just failed), and a non-numeric id must never reach the proxy, whose
+ *  parser rejects a malformed entry. */
+export const isEspnEventId = (id: string): boolean => /^\d{1,12}$/.test(id);
+
+/** Batch URLs for `wants` — real ESPN ids only, deduped by event id (first want wins), chunked at
+ *  SUMMARY_BATCH_MAX. */
 export function summaryBatchUrls(wants: readonly SummaryWant[]): string[] {
 	const seen = new Set<string>();
 	const entries: string[] = [];
 	for (const w of wants) {
-		if (seen.has(w.id)) continue;
+		if (!isEspnEventId(w.id) || seen.has(w.id)) continue;
 		seen.add(w.id);
 		entries.push(`${w.id}:${w.league}${w.bust ? ":1" : ""}`);
 	}
@@ -68,7 +74,8 @@ export async function fetchSummaries(
 	wants: readonly SummaryWant[],
 ): Promise<Map<string, SummaryResult>> {
 	const out = new Map<string, SummaryResult>();
-	for (const url of summaryBatchUrls(wants)) {
+	const urls = summaryBatchUrls(wants);
+	for (const url of urls) {
 		try {
 			const res = await proxy.fetch(url, { headers: { Accept: "application/json" } });
 			if (!res.ok) {
@@ -79,6 +86,13 @@ export async function fetchSummaries(
 		} catch (err) {
 			console.log(`[watcher] DIAG summary batch failed — those matches scoreboard-only this poll: ${err}`);
 		}
+	}
+	if (urls.length > 0) {
+		// One line per poll that needed summaries — the live-verification signal (and a quick read on failures).
+		let ok = 0;
+		for (const r of out.values()) if (r.status === 200) ok++;
+		const failed = [...out].filter(([, r]) => r.status !== 200).map(([id, r]) => `${id}:${r.status}`);
+		console.log(`[watcher] summaries: ${out.size} answered / ${new Set(wants.filter((w) => isEspnEventId(w.id)).map((w) => w.id)).size} wanted in ${urls.length} call(s), ${ok} ok${failed.length ? ` — failed ${failed.slice(0, 6).join(",")}` : ""}`);
 	}
 	return out;
 }
