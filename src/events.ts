@@ -582,8 +582,23 @@ export function clockRunning(m: Match): boolean {
 	// Period 5 = the shootout (verified field; ESPN's LIVE mid-shootout status NAME is unverified, so the
 	// name check below is belt, the period is the braces — clock is frozen at 120' throughout).
 	if (m.period >= 5) return false;
+	if (isPeriodBreak(m)) return false;
 	const n = m.statusName.toUpperCase();
 	return !n.includes("HALFTIME") && !n.includes("SHOOTOUT") && !n.includes("PENALT");
+}
+
+/** A pause BETWEEN periods that is not halftime: ESPN keeps `state == "in"`, freezes the clock at the period cap
+ *  and names the status `STATUS_END_OF_<…>` — LIVE-VERIFIED 2026-11-07 (2026 QF KC–LA, 0–0 at 90'):
+ *  `STATUS_END_OF_REGULATION` (type id 53, period 2, clock 5400, detail "ET") for the break before extra time,
+ *  then `STATUS_OVERTIME` (id 24, period 3) once ET kicks off. The break before a shootout is assumed to follow
+ *  the same `END_OF_` pattern (`STATUS_END_OF_EXTRATIME`, not yet seen live). Before this, the watcher read the
+ *  break as play: the widget counted "90'+18'" through it and the in-app header ticked too. A halftime name is
+ *  NOT a break (it keeps its own proven HT path). */
+export function isPeriodBreak(m: Match): boolean {
+	if (m.state !== "in") return false;
+	const n = m.statusName.toUpperCase();
+	if (n.includes("HALFTIME")) return false;
+	return n.includes("END_OF_") || n.includes("END_PERIOD") || n.includes("BREAK");
 }
 
 /** True once a shootout has been recorded on either side (the `shootoutScore` key exists). */

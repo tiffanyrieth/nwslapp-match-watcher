@@ -1254,6 +1254,9 @@ interface AnchorState {
 	 *  arrive minutes after the goal; when it does, re-broadcast so the card fills the name within one tick
 	 *  instead of waiting for the next event / 10-min floor. Optional: rows written before this field exist. */
 	sc?: number;
+	/** Live phase at the last broadcast — 2026-11-07: re-broadcast on ANY phase change (live → break → extraTime
+	 *  → penalties), not only when the stoppage label or anchor happens to move with it. Optional: older rows. */
+	ph?: string;
 }
 
 async function syncLiveActivity(
@@ -1319,6 +1322,10 @@ async function syncLiveActivity(
 	// SD–NC LA showed only "G. Corley 23'" for ~10 min after the 72' goal). Bounded: ≤1 extra push per goal.
 	const scorerCount = (state.homeScorers?.length ?? 0) + (state.awayScorers?.length ?? 0);
 	if (!resync && prev?.sc != null && prev.sc !== scorerCount) resync = true;
+	// Phase change (2026-11-07): the pre-ET break is entered from stoppage (label change resyncs) and left by an
+	// anchor jump (drift resyncs), but neither is guaranteed for every transition — key on the phase itself.
+	// Bounded: ≤1 push per transition. A legacy row with no `ph` doesn't count as a change.
+	if (!resync && prev?.ph != null && prev.ph !== state.phase) resync = true;
 	// 10-min floor: re-broadcast even during smooth play so the widget can't coast too far behind.
 	if (!resync) resync = prev?.rs == null || Date.now() - prev.rs >= LA_RESYNC_MS;
 	if (resync) {
@@ -1330,7 +1337,7 @@ async function syncLiveActivity(
 		console.log(`[watcher] LA broadcast update ${match.eventId}: ${r.ok ? "ok" : `${r.status} ${r.reason ?? ""}`} epoch=${epoch ?? "paused"} prevEpoch=${prev?.epoch ?? "none"} clock=${match.clock} period=${match.period}`);
 		// ONE write for all fields. Keep the last non-null epoch while paused (HT) so the drift baseline
 		// survives the break — matches the old "only write epoch when running" behavior.
-		const next: AnchorState = { rs: Date.now(), epoch: epoch ?? prev?.epoch ?? null, stop: stoppage, sc: scorerCount };
+		const next: AnchorState = { rs: Date.now(), epoch: epoch ?? prev?.epoch ?? null, stop: stoppage, sc: scorerCount, ph: state.phase };
 		await env.MATCH_STATE.put(anchorKey, JSON.stringify(next), { expirationTtl: MATCH_STATE_TTL });
 	}
 }
@@ -1525,19 +1532,22 @@ async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 	// ET2 at 105:00 with the AWAY equaliser at 108' (two ET goal pushes; clock re-bases per period like ESPN's),
 	// then the shootout: period 5, clock frozen at 120', a kick every 30 s (H✓ A✓ H✓ A✗ H✓ A✗ → 3–1), and the
 	// final as ESPN reports it: STATUS_FINAL_PEN, period 5, "FT-Pens", score still 2–2, winner flagged.
-	// ~13 min wall-clock. Watch for: NO goal buzz on any kick, the LA showing PENS + the tally (build ≥ 42) with
+	// ~15 min wall-clock (two 1-min breaks added 2026-11-07). Watch for: NO goal buzz on any kick, the LA showing PENS + the tally (build ≥ 42) with
 	// the scorer columns holding the four goals only, and FT "WAS 2–2 ORL · WAS win 3–1 on pens".
 	if (p.scenario === "knockout") {
 		const homeId = p.homeId ?? "15365", homeAbbr = p.homeAbbr ?? "WAS";
 		const awayId = p.awayId ?? "18206", awayAbbr = p.awayAbbr ?? "ORL";
 		const m = (n: number) => kickoffMs0 + n * 60_000;
 		const kickoffMs0 = now + 2 * 60_000;
-		const et1 = m(2.5), et2 = m(5), pensAt = m(7.5), ftMs = m(11.5);
+		// Breaks (2026-11-07, live-verified on the 2026 QF KC–LA): 90' → a frozen STATUS_END_OF_REGULATION break
+		// (period 2, clock 5400) BEFORE ET1, and the same shape before the shootout. The opening 2.5 min also run
+		// past 90:00, so the card goes stoppage "90'+1'" → BREAK "ET next" → ● ET, exactly like the real match.
+		const brk1 = m(2.5), et1 = m(3.5), et2 = m(6), brk2 = m(8.5), pensAt = m(9.5), ftMs = m(13.5);
 		const kickSides: Array<["home" | "away", string, boolean]> = [
 			["home", "A. Hatch", true], ["away", "M. Zerboni", true], ["home", "L. Silano", true],
 			["away", "E. González", false], ["home", "T. Rudd", true], ["away", "J. Nighswonger", false],
 		];
-		const kicks: FakeKick[] = kickSides.map(([side, taker, scored], i) => ({ at: m(8) + i * 30_000, side, taker, scored }));
+		const kicks: FakeKick[] = kickSides.map(([side, taker, scored], i) => ({ at: m(10) + i * 30_000, side, taker, scored }));
 		const spec: FakeMatchSpec = {
 			id: `fakematch-${now}`, homeId, homeAbbr, awayId, awayAbbr,
 			kickoffMs: kickoffMs0, ftMs, clockOffsetSec: 88 * 60,
@@ -1549,8 +1559,13 @@ async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 			],
 			reds: [],
 			stages: [
-				{ at: et1, period: 3, name: "STATUS_IN_PROGRESS", clockSec: 90 * 60 },
-				{ at: et2, period: 4, name: "STATUS_IN_PROGRESS", clockSec: 105 * 60 },
+				{ at: brk1, period: 2, name: "STATUS_END_OF_REGULATION", clockSec: 90 * 60, frozen: true },
+				{ at: et1, period: 3, name: "STATUS_OVERTIME", clockSec: 90 * 60 },
+				// ET halftime as ESPN sent it live (2026-11-07): STATUS_HALFTIME_ET (id 49), period 3, clock frozen at 6300
+				// → the existing HT path (name contains HALFTIME), never a break.
+				{ at: et2 - 30_000, period: 3, name: "STATUS_HALFTIME_ET", clockSec: 105 * 60, frozen: true },
+				{ at: et2, period: 4, name: "STATUS_OVERTIME", clockSec: 105 * 60 },
+				{ at: brk2, period: 4, name: "STATUS_END_OF_EXTRATIME", clockSec: 120 * 60, frozen: true },
 				{ at: pensAt, period: 5, name: "STATUS_IN_PROGRESS", clockSec: 120 * 60, frozen: true },
 			],
 			kicks,
@@ -2109,7 +2124,7 @@ async function handleTestBroadcast(request: Request, env: Env): Promise<Response
 		awayScore: p.as ?? 0,
 		phase,
 		clockStartEpoch: running ? nowSec - (p.min ?? 1) * 60 : undefined,
-		staticLabel: phase === "pre" ? "3:00 PM" : phase === "halftime" ? "HT" : phase === "fulltime" ? "FT" : undefined,
+		staticLabel: phase === "pre" ? "3:00 PM" : phase === "halftime" ? "HT" : phase === "break" ? "ET next" : phase === "fulltime" ? "FT" : undefined,
 		lastScorer: p.sc,
 		broadcast: "Paramount+",
 		homeScorers: p.hsc,

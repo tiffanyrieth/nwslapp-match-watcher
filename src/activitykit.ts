@@ -13,7 +13,10 @@
 
 import { ApnsConfig, ApnsResult, apnsJwt } from "./apns";
 
-export type LivePhase = "pre" | "live" | "halftime" | "extraTime" | "penalties" | "fulltime";
+/** "break" (2026-11-07) = the pause BETWEEN periods that is not halftime — ESPN `STATUS_END_OF_REGULATION` before
+ *  extra time (first seen live on the 2026 QF KC–LA) and the break before a shootout. Builds that predate it decode
+ *  an unknown phase as `.live` (forward-compat decode, build ≥ 42) → "● LIVE" pill + the static label, no ticking. */
+export type LivePhase = "pre" | "live" | "halftime" | "break" | "extraTime" | "penalties" | "fulltime";
 
 /** Mirrors Swift MatchActivityAttributes.ContentState. New keys are ADDITIVE-OPTIONAL both
  *  ways: old app builds ignore unknown JSON keys (synthesized Codable), and the Swift fields
@@ -23,7 +26,7 @@ export interface LiveContentState {
 	awayScore: number;
 	phase: LivePhase;
 	clockStartEpoch?: number; // unix seconds = now − elapsedSeconds; omit when the clock is paused
-	staticLabel?: string; // "3:00 PM" | "HT" | "FT" — shown when not ticking
+	staticLabel?: string; // "3:00 PM" | "HT" | "ET next" | "Pens next" | "FT" — shown when not ticking
 	lastScorer?: string; // legacy single line — kept so pre-scorer-columns builds keep rendering
 	broadcast?: string;
 	/** Per-side scorer lines ("C. Hutton 5'"), chronological, capped at 7 (+N overflow marker) —

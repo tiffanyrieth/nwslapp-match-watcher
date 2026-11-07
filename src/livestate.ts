@@ -9,7 +9,7 @@
 
 import type { LiveAttributes, LiveContentState, LivePhase } from "./activitykit";
 import type { Match, ScoreboardEvent } from "./events";
-import { playLabel, wentToPens } from "./events.ts"; // one renderer for scorer lines, shared with the V1 push copy (2026-09-12). `.ts` on purpose: node --test needs it (tsconfig allowImportingTsExtensions)
+import { isPeriodBreak, playLabel, wentToPens } from "./events.ts"; // one renderer for scorer lines, shared with the V1 push copy (2026-09-12). `.ts` on purpose: node --test needs it (tsconfig allowImportingTsExtensions)
 
 // NWSL brand hex by abbreviation (no '#') — mirrors NWSLApp DesignTeamColors.palette.
 // ⚠️ KEEP IN SYNC BY HAND: the app palette had a "verified 2026" brand-color pass (official club
@@ -73,6 +73,9 @@ function phaseFromMatch(m: Match): LivePhase {
 	if (m.state === "post") return "fulltime";
 	const n = m.statusName.toUpperCase();
 	if (n.includes("HALFTIME")) return "halftime";
+	// Between-period pause (END_OF_REGULATION before ET, END_OF_EXTRATIME before pens) — a static card, never a
+	// clock running through the break (2026-11-07: the widget counted 90'+18' through the pre-ET break).
+	if (isPeriodBreak(m) && m.period < 5) return "break";
 	// Period 5 = shootout (verified on real pens matches; the LIVE status NAME is not, so the name match is belt).
 	// Mirrors `clockRunning` — the card must show a static "PENS", never a clock ticking past 120'.
 	if (m.period >= 5 || n.includes("SHOOTOUT") || n.includes("PENALT")) return "penalties";
@@ -132,6 +135,15 @@ function stoppageLabel(elapsedSec: number, period: number): string | undefined {
 	return displayMinute > cap ? `${cap}'+${displayMinute - cap}'` : undefined;
 }
 
+/** What comes NEXT, for the break card's clock slot. Short on purpose: the lock-screen slot is a narrow 14pt
+ *  column ("Extra time next" wraps), and the watch strip is 11pt. Period 2 → ET next; period 4 → pens next;
+ *  period 3 (a non-halftime pause mid-ET, not expected) → a plain "Break". */
+export function breakLabel(period: number): string {
+	if (period === 2) return "ET next";
+	if (period === 4) return "Pens next";
+	return "Break";
+}
+
 /** The current Live Activity content-state for a live/finished match (used for UPDATE / END).
  *  `virtualKickoff` (from StoredState) is the MONOTONIC anchor: ESPN freezes `status.clock` during
  *  stoppage, so re-basing `now − clock` per push snapped the widget clock back to 45:00 on every
@@ -140,7 +152,8 @@ export function contentStateFromMatch(m: Match, virtualKickoff?: number): LiveCo
 	const phase = phaseFromMatch(m);
 	const nowSec = Math.floor(Date.now() / 1000);
 	const running = phase === "live" || phase === "extraTime";
-	const staticLabel = phase === "halftime" ? "HT" : phase === "fulltime" ? "FT" : phase === "penalties" ? "PENS" : undefined;
+	const staticLabel = phase === "halftime" ? "HT" : phase === "fulltime" ? "FT" : phase === "penalties" ? "PENS"
+		: phase === "break" ? breakLabel(m.period) : undefined;
 	const clockStartEpoch = running ? (virtualKickoff ?? nowSec - m.clock) : undefined;
 	// Stoppage label from the MONOTONIC anchor (not ESPN's frozen clock): while running past the cap,
 	// elapsed = now − clockStartEpoch keeps growing → "90'+1'", "+2'"… exactly like the in-app clock.
