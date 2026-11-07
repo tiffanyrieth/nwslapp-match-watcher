@@ -16,6 +16,8 @@ import {
 	clockRunning,
 	detectEvents,
 	fulltimeSubtitle,
+	isPeriodBreak,
+	nextState,
 	knockoutFTNeedsConfirm,
 	mergePlays,
 	parseMatch,
@@ -26,7 +28,7 @@ import {
 	type ScoreboardEvent,
 	type StoredState,
 } from "../src/events.ts";
-import { contentStateFromMatch } from "../src/livestate.ts";
+import { breakLabel, contentStateFromMatch } from "../src/livestate.ts";
 
 const load = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 const PENS = load("knockout-pens-712961.json") as { scoreboardEvent: ScoreboardEvent; summary: { keyEvents: unknown[] } };
@@ -212,4 +214,71 @@ test("summary keyEvents on the pens final: two scoring plays, and merging can't 
 	const merged = mergePlays(m.plays, fromSummary);
 	assert.equal(merged.length, 2);
 	assert.deepEqual(merged.map((p) => p.minute), [56, 90]);
+});
+
+// ── the breaks BETWEEN periods (live-verified 2026-11-07, 2026 QF KC–LA 0–0 at 90') ─────────────────────────
+// ESPN's live sequence: STATUS_END_OF_REGULATION (id 53, state "in", period 2, clock frozen 5400, displayClock
+// still counting "90'+14'", detail "ET") → STATUS_OVERTIME (id 24, period 3, clock 5460 "91'"). Before the fix
+// the break read as play: the widget counted "90'+18'" through it. The break before pens is assumed to follow
+// the same END_OF_ shape (not yet seen live).
+
+/** The real pre-ET break, as the scoreboard reported it (score level, no tally). */
+function preEtBreak(): Match {
+	const m = must(parseMatch(PENS.scoreboardEvent), "a parsed match");
+	return {
+		...m, state: "in", statusName: "STATUS_END_OF_REGULATION", unfinishedPost: false, period: 2, clock: 5400,
+		home: { ...m.home, pens: undefined, winner: undefined }, away: { ...m.away, pens: undefined, winner: undefined },
+	};
+}
+
+test("isPeriodBreak: END_OF_REGULATION / END_OF_EXTRATIME are breaks; halftime, play and finals are not", () => {
+	const b = preEtBreak();
+	assert.equal(isPeriodBreak(b), true);
+	assert.equal(isPeriodBreak({ ...b, period: 4, clock: 7200, statusName: "STATUS_END_OF_EXTRATIME" }), true);
+	assert.equal(isPeriodBreak({ ...b, statusName: "STATUS_HALFTIME" }), false, "halftime keeps its own HT path");
+	assert.equal(isPeriodBreak({ ...b, statusName: "STATUS_HALFTIME_ET" }), false);
+	assert.equal(isPeriodBreak({ ...b, period: 3, clock: 5460, statusName: "STATUS_OVERTIME" }), false);
+	assert.equal(isPeriodBreak({ ...b, statusName: "STATUS_SECOND_HALF" }), false);
+	assert.equal(isPeriodBreak({ ...b, state: "post", statusName: "STATUS_END_OF_REGULATION" }), false, "only a LIVE break");
+});
+
+test("pre-ET break: the clock is NOT running, no goal/FT push, and the anchor is left alone for the ET re-base", () => {
+	const b = preEtBreak();
+	assert.equal(clockRunning(b), false);
+	const prev = liveBefore(b);
+	assert.deepEqual(detectEvents(prev, b).map((e) => e.type), [], "a break is not full time");
+	// Stoppage anchor from 2nd-half play, then 10 minutes of break: the anchor must not move.
+	const stoppage: StoredState = { ...prev, virtualKickoff: 1_700_000_000, vkPeriod: 2 };
+	const during = nextState(stoppage, b, [], 1_700_000_000 + 6_300);
+	assert.equal(during.virtualKickoff, 1_700_000_000);
+	// ET kicks off (period 3, clock 5460): re-base to now − clock, absorbing the break.
+	const et: Match = { ...b, period: 3, clock: 5460, statusName: "STATUS_OVERTIME" };
+	assert.equal(clockRunning(et), true);
+	const after = nextState(during, et, [], 1_700_007_000);
+	assert.equal(after.virtualKickoff, 1_700_007_000 - 5460);
+	assert.equal(after.vkPeriod, 3);
+});
+
+test("pre-ET break Live Activity: phase break, static 'ET next', no ticking clock, no stoppage label", () => {
+	const cs = contentStateFromMatch(preEtBreak(), 1_700_000_000);
+	assert.equal(cs.phase, "break");
+	assert.equal(cs.staticLabel, "ET next");
+	assert.equal(cs.clockStartEpoch, undefined);
+	assert.equal(cs.stoppageDisplay, undefined, "the old bug: '90'+18'' counted through the break");
+	assert.equal(cs.homePens, undefined);
+});
+
+test("pre-pens break Live Activity: period 4 END_OF_EXTRATIME → break, 'Pens next'; period 5 stays PENS", () => {
+	const b = { ...preEtBreak(), period: 4, clock: 7200, statusName: "STATUS_END_OF_EXTRATIME" };
+	const cs = contentStateFromMatch(b, 1_700_000_000);
+	assert.deepEqual([cs.phase, cs.staticLabel, cs.clockStartEpoch, cs.stoppageDisplay], ["break", "Pens next", undefined, undefined]);
+	// Once the shootout starts (period 5) the existing PENS path wins, whatever the name says.
+	const p5 = contentStateFromMatch({ ...b, period: 5, statusName: "STATUS_END_OF_EXTRATIME" }, 1_700_000_000);
+	assert.equal(p5.phase, "penalties");
+	assert.equal(breakLabel(3), "Break");
+});
+
+test("halftime is untouched by the break path: phase halftime, static HT", () => {
+	const ht = contentStateFromMatch({ ...preEtBreak(), period: 2, clock: 2700, statusName: "STATUS_HALFTIME" }, 1_700_000_000);
+	assert.deepEqual([ht.phase, ht.staticLabel, ht.clockStartEpoch], ["halftime", "HT", undefined]);
 });
