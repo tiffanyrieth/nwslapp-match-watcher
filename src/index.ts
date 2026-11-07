@@ -1561,6 +1561,9 @@ async function handleFakeMatch(request: Request, env: Env): Promise<Response> {
 			stages: [
 				{ at: brk1, period: 2, name: "STATUS_END_OF_REGULATION", clockSec: 90 * 60, frozen: true },
 				{ at: et1, period: 3, name: "STATUS_OVERTIME", clockSec: 90 * 60 },
+				// ET halftime as ESPN sent it live (2026-11-07): STATUS_HALFTIME_ET (id 49), period 3, clock frozen at 6300
+				// → the existing HT path (name contains HALFTIME), never a break.
+				{ at: et2 - 30_000, period: 3, name: "STATUS_HALFTIME_ET", clockSec: 105 * 60, frozen: true },
 				{ at: et2, period: 4, name: "STATUS_OVERTIME", clockSec: 105 * 60 },
 				{ at: brk2, period: 4, name: "STATUS_END_OF_EXTRATIME", clockSec: 120 * 60, frozen: true },
 				{ at: pensAt, period: 5, name: "STATUS_IN_PROGRESS", clockSec: 120 * 60, frozen: true },
